@@ -1,7 +1,8 @@
 import { SelectList } from "@earendil-works/pi-tui";
+import { visibleWidth } from "@earendil-works/pi-tui";
 import type { Component, SelectItem, SelectListTheme, TUI } from "@earendil-works/pi-tui";
 import type { RenderState, UiEvent } from "../types.js";
-import { fit, theme } from "./theme.js";
+import { theme } from "./theme.js";
 import { LoginScreen } from "./login-screen.js";
 import { ConversationScreen } from "./conversation-screen.js";
 import { ChatScreen } from "./chat-screen.js";
@@ -80,7 +81,7 @@ export class WechatApp implements Component {
             ? `${c.lastMessageIsSelf ? "You" : c.lastMessageSenderName}: ${c.lastMessagePreview}`
             : c.lastMessageIsSelf ? `You: ${c.lastMessagePreview}` : c.lastMessagePreview)
         : undefined;
-      return { value: c.id, label, description: preview ? fit(preview.replace(/\s+/g, " "), 12) : undefined };
+      return { value: c.id, label, description: preview ? truncatePreview(preview, 24) : undefined };
     });
     items.push({ value: SEARCH_ITEM_VALUE, label: "Search contacts", description: "/contacts" });
 
@@ -153,4 +154,25 @@ function conversationListSignature(items: SelectItem[], maxVisible: number): str
     maxVisible,
     items: items.map((item) => [item.value, item.label, item.description ?? ""])
   });
+}
+
+function truncatePreview(input: string, maxWidth: number): string {
+  const text = input.replace(/\s+/g, " ").trim();
+  if (visibleWidth(text) <= maxWidth) {
+    return text;
+  }
+
+  const ellipsis = "...";
+  const targetWidth = Math.max(0, maxWidth - visibleWidth(ellipsis));
+  let result = "";
+  let width = 0;
+  for (const { segment } of new Intl.Segmenter().segment(text)) {
+    const nextWidth = visibleWidth(segment);
+    if (width + nextWidth > targetWidth) {
+      break;
+    }
+    result += segment;
+    width += nextWidth;
+  }
+  return `${result}${ellipsis}`;
 }

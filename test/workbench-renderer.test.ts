@@ -52,11 +52,11 @@ describe("WorkbenchTerminalRenderer", () => {
 
     expect(output).toContain("Recent Chats");
     expect(output).toContain("Project A");
-    expect(stripAnsi(output)).toContain("Alice: camp…");
+    expect(stripAnsi(output)).toContain("Alice: campaignId cha...");
     expect(output).toContain("select");
   });
 
-  it("truncates conversation previews to twelve columns", () => {
+  it("truncates conversation previews to twenty-four columns", () => {
     const output = renderState(
       baseState({
         conversations: [
@@ -74,7 +74,7 @@ describe("WorkbenchTerminalRenderer", () => {
       })
     );
 
-    expect(stripAnsi(output)).toContain("[link] 这是…");
+    expect(stripAnsi(output)).toContain("[link] 这是一个很长的...");
     expect(stripAnsi(output)).not.toContain("很长的链接标题");
   });
 
