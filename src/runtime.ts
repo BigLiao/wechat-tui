@@ -41,13 +41,11 @@ export class WeChatRuntime extends EventEmitter {
   private selectedConversationIndex = 0;
   private selectedSearchIndex = 0;
   private activeConversationId?: string;
+  private messageScrollOffset = 0;
   private searchKeyword = "";
   private chatInput = "";
   private conversationQuery = "";
   private conversationFocus: "list" | "input" = "list";
-  private readonly chatInputHistory: string[] = [];
-  private chatHistoryIndex = -1;
-  private chatDraftBeforeHistory = "";
   private statusMessage?: string;
   private errorMessage?: string;
   private accountName?: string;
@@ -120,7 +118,6 @@ export class WeChatRuntime extends EventEmitter {
     try {
       if (event.type === "chat-change") {
         this.chatInput = event.text;
-        this.chatHistoryIndex = -1;
       } else {
         await this.submitChatText(event.text);
       }
@@ -261,7 +258,7 @@ export class WeChatRuntime extends EventEmitter {
       this.searchKeyword = "";
       this.conversationQuery = "";
       this.chatInput = "";
-      this.chatHistoryIndex = -1;
+      this.messageScrollOffset = 0;
       this.conversationFocus = "list";
     }
   }
@@ -349,17 +346,17 @@ export class WeChatRuntime extends EventEmitter {
       this.view = "chats";
       this.previousView = "chat";
       this.chatInput = "";
-      this.chatHistoryIndex = -1;
+      this.messageScrollOffset = 0;
       this.conversationFocus = "list";
       this.statusMessage = "back to recent chats";
       return;
     }
     if (isUpKey(key)) {
-      this.navigateChatHistory(-1);
+      this.scrollChatMessages(1);
       return;
     }
     if (isDownKey(key)) {
-      this.navigateChatHistory(1);
+      this.scrollChatMessages(-1);
       return;
     }
     if (isEnterKey(key)) {
@@ -368,14 +365,12 @@ export class WeChatRuntime extends EventEmitter {
     }
     if (isBackspaceKey(key)) {
       this.chatInput = this.chatInput.slice(0, -1);
-      this.chatHistoryIndex = -1;
       return;
     }
 
     const text = printableText(key);
     if (text) {
       this.chatInput += text;
-      this.chatHistoryIndex = -1;
     }
   }
 
@@ -519,7 +514,7 @@ export class WeChatRuntime extends EventEmitter {
     this.conversationQuery = "";
     this.searchKeyword = "";
     this.chatInput = "";
-    this.chatHistoryIndex = -1;
+    this.messageScrollOffset = 0;
     this.store.markRead(conversation.id);
     this.statusMessage = `opened ${conversation.title}`;
     this.options.logger?.info(
@@ -539,12 +534,10 @@ export class WeChatRuntime extends EventEmitter {
   private async submitChatText(rawText: string): Promise<void> {
     const text = rawText.trim();
     this.chatInput = "";
-    this.chatHistoryIndex = -1;
-    this.chatDraftBeforeHistory = "";
+    this.messageScrollOffset = 0;
     if (!text) {
       return;
     }
-    this.addChatHistory(text);
     if (text.startsWith("/")) {
       await this.executeCommand(text, "chat");
       return;
@@ -552,45 +545,8 @@ export class WeChatRuntime extends EventEmitter {
     await this.sendToActiveConversation(text);
   }
 
-  private addChatHistory(text: string): void {
-    if (!text) {
-      return;
-    }
-    if (this.chatInputHistory[0] === text) {
-      return;
-    }
-    this.chatInputHistory.unshift(text);
-    if (this.chatInputHistory.length > 100) {
-      this.chatInputHistory.pop();
-    }
-  }
-
-  private navigateChatHistory(direction: -1 | 1): void {
-    if (this.chatInputHistory.length === 0) {
-      return;
-    }
-
-    if (direction < 0) {
-      if (this.chatHistoryIndex === -1) {
-        this.chatDraftBeforeHistory = this.chatInput;
-        this.chatHistoryIndex = 0;
-      } else {
-        this.chatHistoryIndex = Math.min(this.chatHistoryIndex + 1, this.chatInputHistory.length - 1);
-      }
-      this.chatInput = this.chatInputHistory[this.chatHistoryIndex] ?? "";
-      return;
-    }
-
-    if (this.chatHistoryIndex === -1) {
-      return;
-    }
-    if (this.chatHistoryIndex === 0) {
-      this.chatHistoryIndex = -1;
-      this.chatInput = this.chatDraftBeforeHistory;
-      return;
-    }
-    this.chatHistoryIndex -= 1;
-    this.chatInput = this.chatInputHistory[this.chatHistoryIndex] ?? "";
+  private scrollChatMessages(delta: number): void {
+    this.messageScrollOffset = Math.max(0, this.messageScrollOffset + delta);
   }
 
   private listVisibleConversations(): ConversationRecord[] {
@@ -652,6 +608,7 @@ export class WeChatRuntime extends EventEmitter {
       };
       const saved = this.store.saveMessage(message, conversationInputFromRecord(activeConversation), false);
       this.store.markRead(activeConversation.id);
+      this.messageScrollOffset = 0;
       this.persistSessionData();
       this.statusMessage = "message sent";
       this.options.logger?.info(
@@ -724,7 +681,7 @@ export class WeChatRuntime extends EventEmitter {
     this.selectedConversationIndex = clampSelection(this.selectedConversationIndex, conversations.length + 1);
     const activeConversation = this.getActiveConversation();
     const messages = activeConversation
-      ? this.store.listMessages(activeConversation.id, this.options.initialHistoryLimit ?? 30)
+      ? this.store.listMessages(activeConversation.id, this.activeMessageLimit())
       : [];
     const searchResults = this.view === "search" ? this.store.searchContacts(this.searchKeyword, this.options.searchLimit ?? 20) : [];
     this.selectedSearchIndex = clampSelection(this.selectedSearchIndex, searchResults.length);
@@ -781,6 +738,7 @@ export class WeChatRuntime extends EventEmitter {
       searchResults,
       selectedSearchIndex: this.selectedSearchIndex,
       chatInput: this.chatInput,
+      messageScrollOffset: this.messageScrollOffset,
       commandInput: this.conversationQuery.startsWith("/") ? this.conversationQuery : "",
       totalUnreadCount,
       unreadConversations
@@ -792,6 +750,15 @@ export class WeChatRuntime extends EventEmitter {
       return undefined;
     }
     return this.store.findConversationById(this.activeConversationId);
+  }
+
+  private activeMessageLimit(): number {
+    const base = this.options.initialHistoryLimit ?? 30;
+    const max = Math.max(base, 500);
+    if (this.messageScrollOffset <= 0) {
+      return base;
+    }
+    return Math.min(max, base + this.messageScrollOffset + 50);
   }
 
   private clampSearchSelection(): void {

@@ -31,6 +31,7 @@ function emptyState(): RenderState {
     searchResults: [],
     selectedSearchIndex: 0,
     chatInput: "",
+    messageScrollOffset: 0,
     commandInput: "",
     totalUnreadCount: 0,
     unreadConversations: []

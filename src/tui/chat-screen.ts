@@ -22,15 +22,9 @@ export class ChatScreen {
       errorLines.push(fit(`  ${theme.error(state.errorMessage)}`, width));
     }
 
-    // Content: messages
-    const contentLines = this.messages.render(state, width, rows);
-
     // Unread from other conversations
     const otherUnread = unreadSummary(state);
-    if (otherUnread) {
-      contentLines.push("");
-      contentLines.push(fit(`  ${theme.dim(otherUnread)}`, width));
-    }
+    const otherUnreadLines = otherUnread ? ["", fit(`  ${theme.dim(otherUnread)}`, width)] : [];
 
     // Fixed bottom: status bar + editor
     const editorLines = this.editor.render(width);
@@ -39,11 +33,19 @@ export class ChatScreen {
     bottomLines.push(this.statusBar.render(state, HINTS_CHAT, width, unreadText));
     bottomLines.push(...editorLines);
 
+    // Content: messages, sized to the remaining viewport above the fixed bottom.
+    const messageRows = Math.max(
+      1,
+      rows - headerLines.length - errorLines.length - otherUnreadLines.length - bottomLines.length
+    );
+    const contentLines = this.messages.render(state, width, messageRows);
+
     // Layout: header → fill → error + content → bottom (bottom-aligned)
-    const fixedCount = headerLines.length + errorLines.length + contentLines.length + bottomLines.length;
+    const fixedCount =
+      headerLines.length + errorLines.length + contentLines.length + otherUnreadLines.length + bottomLines.length;
     const fill = fillLines(rows, fixedCount, 0, width);
 
-    return [...headerLines, ...fill, ...errorLines, ...contentLines, ...bottomLines];
+    return [...headerLines, ...fill, ...errorLines, ...contentLines, ...otherUnreadLines, ...bottomLines];
   }
 }
 

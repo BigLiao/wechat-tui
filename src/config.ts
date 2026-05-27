@@ -65,7 +65,7 @@ export function formatHelp(): string {
     "",
     "Controls:",
     "  chats:   type to filter local chats, Up/Down select, Enter open, /contacts, Esc/q quit",
-    "  chat:    Chat > text, Enter send, Esc chats, slash commands autocomplete",
+    "  chat:    Chat > text, Enter send, Up/Down scroll messages, Esc chats, slash commands autocomplete",
     "  search:  Search > keyword, Up/Down select, Enter open, Esc back",
     "",
     "Commands:",

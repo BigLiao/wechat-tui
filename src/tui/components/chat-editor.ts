@@ -47,9 +47,6 @@ export class ChatEditor implements Component {
       }
     };
     this.focusTarget.onSubmit = (text) => {
-      if (text.trim()) {
-        this.focusTarget.addToHistory(text);
-      }
       this.onEvent({ type: "chat-submit", text });
     };
   }

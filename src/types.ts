@@ -167,6 +167,7 @@ export interface RenderState {
   searchResults: ContactRecord[];
   selectedSearchIndex: number;
   chatInput: string;
+  messageScrollOffset: number;
   commandInput: string;
   totalUnreadCount: number;
   unreadConversations: ConversationRecord[];

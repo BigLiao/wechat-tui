@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { renderState } from "../src/ui/workbench-renderer.js";
+import { MessageList } from "../src/tui/components/message-list.js";
 import type { RenderState } from "../src/types.js";
 
 function baseState(overrides: Partial<RenderState>): RenderState {
@@ -15,6 +16,7 @@ function baseState(overrides: Partial<RenderState>): RenderState {
     searchResults: [],
     selectedSearchIndex: 0,
     chatInput: "",
+    messageScrollOffset: 0,
     commandInput: "",
     totalUnreadCount: 0,
     unreadConversations: [],
@@ -128,5 +130,36 @@ describe("WorkbenchTerminalRenderer", () => {
 
     expect(output).toContain("[image]");
     expect(output).not.toContain("<xml />");
+  });
+
+  it("renders older message list content when the chat scroll offset is above the bottom", () => {
+    const activeConversation = {
+      id: "conversation:boss",
+      protocolId: "@boss",
+      kind: "private" as const,
+      title: "Boss",
+      unreadCount: 0,
+      updatedAt: 1_700_000_000_000
+    };
+    const messages = Array.from({ length: 8 }, (_, index) => ({
+      id: `message:${index + 1}`,
+      conversationId: activeConversation.id,
+      senderName: "Boss",
+      isSelf: false,
+      content: `msg ${index + 1}`,
+      type: "text" as const,
+      timestamp: 1_700_000_000_000 + index,
+      createdAt: 1_700_000_000_000 + index
+    }));
+    const list = new MessageList();
+
+    const bottom = list.render(baseState({ view: "chat", activeConversation, messages }), 80, 6).join("\n");
+    const older = list
+      .render(baseState({ view: "chat", activeConversation, messages, messageScrollOffset: 6 }), 80, 6)
+      .join("\n");
+
+    expect(bottom).toContain("msg 8");
+    expect(older).toContain("msg 6");
+    expect(older).not.toContain("msg 8");
   });
 });

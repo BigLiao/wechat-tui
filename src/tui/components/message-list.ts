@@ -22,7 +22,7 @@ export class MessageList {
       return [fit(`  ${theme.dim("No messages yet.")}`, width)];
     }
 
-    const budget = Math.max(5, rows - 8);
+    const budget = Math.max(1, rows);
     const allLines: string[] = [];
 
     for (let i = 0; i < state.messages.length; i++) {
@@ -33,7 +33,11 @@ export class MessageList {
       allLines.push(...formatMessage(message, conversation, width));
     }
 
-    return allLines.slice(-budget);
+    const maxOffset = Math.max(0, allLines.length - budget);
+    const offset = Math.min(Math.max(0, state.messageScrollOffset), maxOffset);
+    const end = allLines.length - offset;
+    const start = Math.max(0, end - budget);
+    return allLines.slice(start, end);
   }
 }
 

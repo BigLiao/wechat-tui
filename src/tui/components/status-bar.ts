@@ -21,6 +21,6 @@ export class StatusBar {
 // ─── Hint sets per view ───────────────────────────────────────────────────────
 
 export const HINTS_CONVERSATION = ["↑↓ select", "⏎ open", "⎋ quit"];
-export const HINTS_CHAT = ["⏎ send", "⎋ back", "↑↓ history"];
+export const HINTS_CHAT = ["⏎ send", "⎋ back", "↑↓ scroll"];
 export const HINTS_SEARCH = ["↑↓ select", "⏎ open", "⎋ back"];
 export const HINTS_LOGIN = ["scan QR to login", "q quit"];

@@ -244,6 +244,31 @@ describe("WeChatRuntime", () => {
     store.close();
   });
 
+  it("scrolls chat messages with arrow keys instead of prompt history", async () => {
+    const store = new SqliteStore(tempDb());
+    const protocol = new MockProtocol();
+    const renderer = new FakeRenderer();
+    const runtime = new WeChatRuntime(protocol, store, renderer, { initialHistoryLimit: 10 });
+
+    await runtime.start();
+    protocol.emitIncoming("Boss", "first", 1_700_000_000_000);
+    await runtime.handleKey(key.enter());
+
+    await pressText(runtime, "reply");
+    await runtime.handleKey(key.enter());
+    await pressText(runtime, "draft");
+
+    await runtime.handleKey(key.up());
+    expect(renderer.latest.chatInput).toBe("draft");
+    expect(renderer.latest.messageScrollOffset).toBe(1);
+
+    await runtime.handleKey(key.down());
+    expect(renderer.latest.chatInput).toBe("draft");
+    expect(renderer.latest.messageScrollOffset).toBe(0);
+
+    store.close();
+  });
+
   it("navigates to search via the search item in conversation list", async () => {
     const store = new SqliteStore(tempDb());
     const protocol = new MockProtocol();

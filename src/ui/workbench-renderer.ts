@@ -127,7 +127,7 @@ function printableData(data: string): string {
 }
 
 function isGlobalChatKey(key: UiKey): boolean {
-  return key.ctrl === true || key.name === "escape";
+  return key.ctrl === true || key.name === "escape" || key.name === "up" || key.name === "down";
 }
 
 function isGlobalChatsKey(key: UiKey): boolean {
