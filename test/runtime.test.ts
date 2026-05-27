@@ -7,7 +7,7 @@ import { MockProtocol } from "../src/protocol/mock-protocol.js";
 import { WeChatRuntime } from "../src/runtime.js";
 import { SqliteStore } from "../src/store/sqlite-store.js";
 import type { ConnectionState, ContactInput, UserProfile, WeChatProtocol } from "../src/types.js";
-import { contactId } from "../src/util/ids.js";
+import { contactId, conversationFromContact, localMessageId } from "../src/util/ids.js";
 import { FakeRenderer, key } from "./helpers.js";
 
 const tempDirs: string[] = [];
@@ -77,6 +77,65 @@ class ContactsBeforeLoginProtocol extends EventEmitter implements WeChatProtocol
   }
 }
 
+class PublicConversationProtocol extends EventEmitter implements WeChatProtocol {
+  private readonly self: ContactInput = {
+    id: contactId("self", ["public-fold-self"]),
+    protocolId: "@public-fold-self",
+    kind: "self",
+    displayName: "Public Fold User",
+    isSelf: true
+  };
+
+  async start(): Promise<void> {
+    this.emit("state", "online" satisfies ConnectionState);
+    this.emit("login", this.getCurrentUser());
+  }
+
+  async reconnect(): Promise<void> {}
+
+  async logout(): Promise<void> {
+    this.emit("logout");
+  }
+
+  async sendText(): Promise<{ messageId?: string; raw?: unknown }> {
+    return {};
+  }
+
+  async getContacts(): Promise<ContactInput[]> {
+    return [this.self];
+  }
+
+  getCurrentUser(): UserProfile {
+    return {
+      id: this.self.id,
+      protocolId: this.self.protocolId,
+      displayName: this.self.displayName
+    };
+  }
+
+  getSessionData(): unknown | undefined {
+    return undefined;
+  }
+
+  emitPublicMessage(displayName: string, content: string, timestamp: number): void {
+    const contact: ContactInput = {
+      id: contactId("public", [displayName]),
+      protocolId: `@public-${displayName}`,
+      kind: "public",
+      displayName
+    };
+    this.emit("message", {
+      id: localMessageId([contact.id, content, String(timestamp)]),
+      conversation: conversationFromContact(contact),
+      sender: contact,
+      isSelf: false,
+      content,
+      type: "notice",
+      timestamp
+    });
+  }
+}
+
 afterEach(() => {
   for (const dir of tempDirs.splice(0)) {
     rmSync(dir, { recursive: true, force: true });
@@ -95,6 +154,35 @@ describe("WeChatRuntime", () => {
     expect(renderer.latest.view).toBe("chats");
     expect(renderer.latest.accountName).toBe("Early User");
     expect(store.searchContacts("Early Boss")).toHaveLength(1);
+    store.close();
+  });
+
+  it("folds public account conversations in the recent chat list", async () => {
+    const store = new SqliteStore(tempDb());
+    const protocol = new PublicConversationProtocol();
+    const renderer = new FakeRenderer();
+    const runtime = new WeChatRuntime(protocol, store, renderer, { initialHistoryLimit: 10 });
+
+    await runtime.start();
+    protocol.emitPublicMessage("深圳本地宝", "article one", 1_700_000_000_000);
+
+    expect(renderer.latest.conversations).toHaveLength(1);
+    expect(renderer.latest.conversations[0]?.title).toBe("公众号");
+    expect(renderer.latest.conversations[0]?.unreadCount).toBe(0);
+
+    protocol.emitPublicMessage("深圳民政", "article two", 1_700_000_100_000);
+
+    expect(renderer.latest.conversations).toHaveLength(1);
+    expect(renderer.latest.conversations[0]?.title).toBe("公众号");
+    expect(renderer.latest.conversations[0]?.unreadCount).toBe(0);
+    expect(renderer.latest.conversations[0]?.lastMessageSenderName).toBe("深圳民政");
+    expect(renderer.latest.totalUnreadCount).toBe(0);
+    expect(renderer.latest.unreadConversations).toHaveLength(0);
+    expect(renderer.latest.statusMessage).not.toContain("new message");
+
+    await runtime.handleKey(key.enter());
+    expect(renderer.latest.view).toBe("chat");
+    expect(renderer.latest.activeConversation?.title).toBe("深圳民政");
     store.close();
   });
 

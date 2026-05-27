@@ -594,7 +594,7 @@ export class WeChatRuntime extends EventEmitter {
   }
 
   private listVisibleConversations(): ConversationRecord[] {
-    const conversations = this.store.listRecentConversations(this.options.conversationListLimit ?? 20);
+    const conversations = foldPublicConversations(this.store.listRecentConversations(this.options.conversationListLimit ?? 20));
     const query = this.conversationQuery.trim().toLocaleLowerCase();
     if (!query || query.startsWith("/")) {
       return conversations;
@@ -671,7 +671,8 @@ export class WeChatRuntime extends EventEmitter {
       this.store.upsertContact(scopedIncoming.sender);
     }
     const isActive = this.activeConversationId === scopedIncoming.conversation.id;
-    const incrementUnread = !scopedIncoming.isSelf && !isActive;
+    const isPublic = scopedIncoming.conversation.kind === "public";
+    const incrementUnread = !isPublic && !scopedIncoming.isSelf && !isActive;
     const saved = this.store.saveMessage(
       {
         id: scopedIncoming.id,
@@ -689,7 +690,9 @@ export class WeChatRuntime extends EventEmitter {
       incrementUnread
     );
 
-    if (isActive) {
+    if (isPublic) {
+      // Public account updates should be archived without creating unread or status reminders.
+    } else if (isActive) {
       this.store.markRead(scopedIncoming.conversation.id);
       this.statusMessage = "new message";
     } else if (this.view === "chat" || this.view === "search") {
@@ -725,7 +728,7 @@ export class WeChatRuntime extends EventEmitter {
       : [];
     const searchResults = this.view === "search" ? this.store.searchContacts(this.searchKeyword, this.options.searchLimit ?? 20) : [];
     this.selectedSearchIndex = clampSelection(this.selectedSearchIndex, searchResults.length);
-    const unreadConversations = this.store.listUnreadConversations(6);
+    const unreadConversations = foldPublicConversations(this.store.listUnreadConversations(20)).slice(0, 6);
     const totalUnreadCount = this.store.totalUnreadCount();
 
     this.options.logger?.trace(
@@ -846,6 +849,35 @@ function contactFromConversationInput(conversation: ConversationInput): ContactI
     displayName: conversation.title,
     isSelf: false
   };
+}
+
+function foldPublicConversations(conversations: ConversationRecord[]): ConversationRecord[] {
+  const publicConversations = conversations.filter((conversation) => conversation.kind === "public");
+  if (publicConversations.length === 0) {
+    return conversations;
+  }
+
+  const latestPublic = publicConversations[0];
+  const publicFold: ConversationRecord = {
+    ...latestPublic,
+    title: "公众号",
+    unreadCount: 0,
+    lastMessageSenderName: latestPublic.title,
+    updatedAt: Math.max(...publicConversations.map((conversation) => conversation.updatedAt))
+  };
+  const folded = conversations.filter((conversation) => conversation.kind !== "public");
+  folded.push(publicFold);
+  return folded.sort(compareRecentConversations);
+}
+
+function compareRecentConversations(left: ConversationRecord, right: ConversationRecord): number {
+  const leftHasMessage = left.lastMessageAt === undefined ? 1 : 0;
+  const rightHasMessage = right.lastMessageAt === undefined ? 1 : 0;
+  return (
+    leftHasMessage - rightHasMessage ||
+    (right.lastMessageAt ?? 0) - (left.lastMessageAt ?? 0) ||
+    right.updatedAt - left.updatedAt
+  );
 }
 
 function isQuitKey(key: UiKey): boolean {

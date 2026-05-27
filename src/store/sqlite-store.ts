@@ -258,6 +258,7 @@ export class SqliteStore implements MessageStore {
     if (!saved) {
       throw new Error(`Failed to save contact ${contact.id}`);
     }
+    this.backfillConversationTitlesFromContact(saved);
     this.backfillSenderNameFromContact(saved);
     this.options.logger?.trace(
       {
@@ -292,16 +293,17 @@ export class SqliteStore implements MessageStore {
     if (!accountId) {
       return [];
     }
+    const scanLimit = Math.max(limit * 3, limit);
     const rows = kind
       ? (this.db
           .prepare(
             "SELECT * FROM contacts WHERE account_id = ? AND kind = ? AND is_self = 0 ORDER BY display_name COLLATE NOCASE LIMIT ?"
           )
-          .all(accountId, kind, limit) as unknown as ContactRow[])
+          .all(accountId, kind, scanLimit) as unknown as ContactRow[])
       : (this.db
           .prepare("SELECT * FROM contacts WHERE account_id = ? AND is_self = 0 ORDER BY display_name COLLATE NOCASE LIMIT ?")
-          .all(accountId, limit) as unknown as ContactRow[]);
-    const contacts = rows.map(asContact);
+          .all(accountId, scanLimit) as unknown as ContactRow[]);
+    const contacts = dedupeContactsByProtocol(rows.map(asContact)).slice(0, limit);
     this.options.logger?.debug({ kind, limit, count: contacts.length }, "listed contacts");
     return contacts;
   }
@@ -339,6 +341,7 @@ export class SqliteStore implements MessageStore {
     if (!accountId) {
       return [];
     }
+    const scanLimit = Math.max(limit * 3, limit);
     const normalized = keyword.trim().toLowerCase();
     const rows = normalized
       ? (this.db
@@ -360,14 +363,14 @@ export class SqliteStore implements MessageStore {
             normalized,
             normalized,
             normalized,
-            limit
+            scanLimit
           ) as unknown as ContactRow[])
       : (this.db
           .prepare(
             "SELECT * FROM contacts WHERE account_id = ? AND is_self = 0 AND kind IN ('private', 'group') ORDER BY updated_at DESC, display_name COLLATE NOCASE LIMIT ?"
           )
-          .all(accountId, limit) as unknown as ContactRow[]);
-    const contacts = rows.map(asContact);
+          .all(accountId, scanLimit) as unknown as ContactRow[]);
+    const contacts = dedupeContactsByProtocol(rows.map(asContact)).slice(0, limit);
     this.options.logger?.debug({ keyword, limit, count: contacts.length }, "searched contacts");
     return contacts;
   }
@@ -435,12 +438,13 @@ export class SqliteStore implements MessageStore {
   }
 
   saveMessage(message: MessageInput, conversation: ConversationInput, incrementUnread: boolean): MessageRecord {
+    const unreadIncrement = conversation.kind === "public" ? 0 : incrementUnread ? 1 : 0;
     const accountId = this.requireActiveAccountId("save message");
     this.options.logger?.debug(
       {
         message: summarizeMessageInput(message),
         conversation: summarizeConversationInput(conversation),
-        incrementUnread
+        incrementUnread: unreadIncrement > 0
       },
       "saving message"
     );
@@ -483,7 +487,7 @@ export class SqliteStore implements MessageStore {
             message.timestamp,
             message.senderName,
             message.isSelf ? 1 : 0,
-            incrementUnread ? 1 : 0,
+            unreadIncrement,
             now,
             accountId,
             conversation.id
@@ -511,7 +515,7 @@ export class SqliteStore implements MessageStore {
     this.options.logger?.debug(
       {
         inserted,
-        incrementUnread,
+        incrementUnread: unreadIncrement > 0,
         message: summarizeStoredMessage(saved)
       },
       inserted ? "message saved" : "duplicate message ignored"
@@ -524,12 +528,13 @@ export class SqliteStore implements MessageStore {
     if (!accountId) {
       return [];
     }
+    const scanLimit = Math.max(limit * 3, limit);
     const rows = this.db
       .prepare(
         "SELECT * FROM conversations WHERE account_id = ? ORDER BY last_message_at IS NULL ASC, last_message_at DESC, updated_at DESC LIMIT ?"
       )
-      .all(accountId, limit) as unknown as ConversationRow[];
-    const conversations = rows.map(asConversation);
+      .all(accountId, scanLimit) as unknown as ConversationRow[];
+    const conversations = dedupeConversationsByProtocol(rows.map(asConversation)).slice(0, limit);
     this.options.logger?.debug({ limit, count: conversations.length }, "listed recent conversations");
     return conversations;
   }
@@ -539,12 +544,14 @@ export class SqliteStore implements MessageStore {
     if (!accountId) {
       return [];
     }
+    const scanLimit = Math.max(limit * 3, limit);
     const rows = this.db
       .prepare(
-        "SELECT * FROM conversations WHERE account_id = ? AND unread_count > 0 ORDER BY last_message_at DESC, updated_at DESC LIMIT ?"
+        "SELECT * FROM conversations WHERE account_id = ? AND kind <> 'public' AND unread_count > 0 " +
+          "ORDER BY last_message_at DESC, updated_at DESC LIMIT ?"
       )
-      .all(accountId, limit) as unknown as ConversationRow[];
-    const conversations = rows.map(asConversation);
+      .all(accountId, scanLimit) as unknown as ConversationRow[];
+    const conversations = dedupeConversationsByProtocol(rows.map(asConversation)).slice(0, limit);
     this.options.logger?.debug({ limit, count: conversations.length }, "listed unread conversations");
     return conversations;
   }
@@ -622,9 +629,9 @@ export class SqliteStore implements MessageStore {
     if (!accountId) {
       return 0;
     }
-    const row = this.db.prepare("SELECT COALESCE(SUM(unread_count), 0) AS total FROM conversations WHERE account_id = ?").get(accountId) as
-      | { total: number }
-      | undefined;
+    const row = this.db
+      .prepare("SELECT COALESCE(SUM(unread_count), 0) AS total FROM conversations WHERE account_id = ? AND kind <> 'public'")
+      .get(accountId) as { total: number } | undefined;
     const total = Number(row?.total ?? 0);
     this.options.logger?.trace({ total }, "computed total unread count");
     return total;
@@ -650,6 +657,19 @@ export class SqliteStore implements MessageStore {
       | MessageRow
       | undefined;
     return row ? asMessage(row) : undefined;
+  }
+
+  private backfillConversationTitlesFromContact(contact: ContactRecord): void {
+    const accountId = this.currentAccountId();
+    if (!accountId || !contact.protocolId || !isUsefulSenderName(contact.displayName)) {
+      return;
+    }
+    this.db
+      .prepare(
+        "UPDATE conversations SET title = ?, updated_at = ? " +
+          "WHERE account_id = ? AND protocol_id = ? AND (title = 'Unknown' OR title = 'Group member' OR title LIKE '@%')"
+      )
+      .run(contact.displayName, Date.now(), accountId, contact.protocolId);
   }
 
   private backfillSenderNameFromContact(contact: ContactRecord): void {
@@ -815,4 +835,52 @@ export class SqliteStore implements MessageStore {
 
 function isUsefulSenderName(value: string | undefined): value is string {
   return !!value && value !== "Unknown" && value !== "Group member" && !value.startsWith("@");
+}
+
+function dedupeContactsByProtocol(contacts: ContactRecord[]): ContactRecord[] {
+  const deduped = new Map<string, ContactRecord>();
+  for (const contact of contacts) {
+    const key = contact.protocolId ? `${contact.kind}:${contact.protocolId}` : contact.id;
+    const current = deduped.get(key);
+    if (!current || compareContactQuality(contact, current) > 0) {
+      deduped.set(key, contact);
+    }
+  }
+  return Array.from(deduped.values());
+}
+
+function compareContactQuality(left: ContactRecord, right: ContactRecord): number {
+  const leftScore = (isUsefulSenderName(left.displayName) ? 4 : 0) + (left.nickName ? 2 : 0) + (left.remarkName ? 2 : 0);
+  const rightScore = (isUsefulSenderName(right.displayName) ? 4 : 0) + (right.nickName ? 2 : 0) + (right.remarkName ? 2 : 0);
+  return leftScore - rightScore || left.updatedAt - right.updatedAt;
+}
+
+function dedupeConversationsByProtocol(conversations: ConversationRecord[]): ConversationRecord[] {
+  const deduped = new Map<string, ConversationRecord>();
+  for (const conversation of conversations) {
+    const key = conversation.protocolId ? `${conversation.kind}:${conversation.protocolId}` : conversation.id;
+    const current = deduped.get(key);
+    if (!current || compareConversationQuality(conversation, current) > 0) {
+      deduped.set(key, conversation);
+    }
+  }
+  return Array.from(deduped.values()).sort(compareRecentConversations);
+}
+
+function compareConversationQuality(left: ConversationRecord, right: ConversationRecord): number {
+  const leftScore =
+    (left.lastMessageAt ? 8 : 0) + (isUsefulSenderName(left.title) ? 4 : 0) + (left.lastMessagePreview ? 2 : 0);
+  const rightScore =
+    (right.lastMessageAt ? 8 : 0) + (isUsefulSenderName(right.title) ? 4 : 0) + (right.lastMessagePreview ? 2 : 0);
+  return leftScore - rightScore || (left.lastMessageAt ?? 0) - (right.lastMessageAt ?? 0) || left.updatedAt - right.updatedAt;
+}
+
+function compareRecentConversations(left: ConversationRecord, right: ConversationRecord): number {
+  const leftHasMessage = left.lastMessageAt === undefined ? 1 : 0;
+  const rightHasMessage = right.lastMessageAt === undefined ? 1 : 0;
+  return (
+    leftHasMessage - rightHasMessage ||
+    (right.lastMessageAt ?? 0) - (left.lastMessageAt ?? 0) ||
+    right.updatedAt - left.updatedAt
+  );
 }

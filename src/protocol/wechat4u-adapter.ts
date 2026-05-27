@@ -289,14 +289,10 @@ function normalizeContact(raw: RawContact, self?: RawContact): ContactInput {
   const remarkName = cleanText(raw.RemarkName);
   const nickName = cleanText(raw.NickName);
   const alias = cleanText(raw.Alias);
-  const id = contactId(kind, [
-    raw.Uin ? String(raw.Uin) : undefined,
-    alias,
-    remarkName,
-    nickName,
-    displayName,
-    protocolId
-  ]);
+  const id = contactId(
+    kind,
+    protocolId ? [protocolId] : [raw.Uin ? String(raw.Uin) : undefined, alias, remarkName, nickName, displayName]
+  );
 
   return {
     id,
@@ -521,7 +517,7 @@ function detectContactKind(raw: RawContact, self?: RawContact): ContactKind {
   if (raw.UserName?.endsWith("@chatroom")) {
     return "group";
   }
-  if (raw.VerifyFlag && raw.VerifyFlag > 0) {
+  if (isPublicVerifyFlag(raw.VerifyFlag)) {
     return "public";
   }
   if (raw.KeyWord?.startsWith("gh_")) {
@@ -531,6 +527,15 @@ function detectContactKind(raw: RawContact, self?: RawContact): ContactKind {
     return "private";
   }
   return "special";
+}
+
+function isPublicVerifyFlag(value: unknown): boolean {
+  const verifyFlag = Number(value ?? 0);
+  const biz = 1;
+  const bizBig = 4;
+  const bizBrand = 8;
+  const bizVerified = 16;
+  return (verifyFlag & (biz | bizBig | bizBrand | bizVerified)) !== 0;
 }
 
 function firstCleanContactDisplayName(...inputs: Array<unknown>): string {

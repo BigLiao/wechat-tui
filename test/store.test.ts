@@ -124,6 +124,54 @@ describe("SqliteStore", () => {
     store.close();
   });
 
+  it("deduplicates protocol contacts and backfills placeholder conversation titles", () => {
+    const store = new SqliteStore(tempDb());
+    store.setActiveAccount(accountA);
+    const sparseContact: ContactInput = {
+      id: "contact:public:sparse",
+      protocolId: "@public",
+      kind: "public",
+      displayName: "@public"
+    };
+    const richContact: ContactInput = {
+      id: "contact:public:rich",
+      protocolId: "@public",
+      kind: "public",
+      displayName: "Public Account",
+      nickName: "Public Account"
+    };
+    const sparseConversation = conversationFromContact(sparseContact);
+    const richConversation = conversationFromContact(richContact);
+
+    store.upsertContact(sparseContact);
+    store.saveMessage(
+      {
+        id: localMessageId([sparseConversation.id, "first"]),
+        conversationId: sparseConversation.id,
+        senderId: sparseContact.id,
+        senderName: "@public",
+        isSelf: false,
+        content: "first message",
+        type: "text",
+        timestamp: 1_700_000_000_000
+      },
+      sparseConversation,
+      true
+    );
+    store.upsertContact(richContact);
+    store.upsertConversation(richConversation);
+
+    const contacts = store.listContacts("public", 10);
+    expect(contacts.map((contact) => contact.displayName)).toEqual(["Public Account"]);
+    const conversations = store.listRecentConversations(10);
+    expect(conversations.map((conversation) => conversation.protocolId)).toEqual(["@public"]);
+    expect(conversations[0]?.title).toBe("Public Account");
+    expect(store.listMessages(sparseConversation.id)[0]?.senderName).toBe("Public Account");
+    expect(store.totalUnreadCount()).toBe(0);
+    expect(store.listUnreadConversations()).toHaveLength(0);
+    store.close();
+  });
+
   it("isolates contacts, conversations, messages, and unread counts by active account", () => {
     const store = new SqliteStore(tempDb());
     const baseContactId = contactId("private", ["shared-contact"]);

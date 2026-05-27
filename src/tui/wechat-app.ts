@@ -75,7 +75,7 @@ export class WechatApp implements Component {
       const badge = c.unreadCount > 0 ? ` (${c.unreadCount})` : "";
       const label = `${c.title}${badge}`;
       const preview = c.lastMessagePreview
-        ? (c.kind === "group" && c.lastMessageSenderName
+        ? ((c.kind === "group" || c.title === "公众号") && c.lastMessageSenderName
             ? `${c.lastMessageIsSelf ? "You" : c.lastMessageSenderName}: ${c.lastMessagePreview}`
             : c.lastMessageIsSelf ? `You: ${c.lastMessagePreview}` : c.lastMessagePreview)
         : undefined;

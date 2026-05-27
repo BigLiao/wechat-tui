@@ -100,6 +100,53 @@ describe("normalizeWechat4uMessage", () => {
     expect(message?.type).toBe("image");
   });
 
+  it("keeps the same conversation id when richer contact metadata arrives later", () => {
+    const sparseMessage = normalizeWechat4uMessage(
+      {
+        MsgId: "public-1",
+        FromUserName: "@public-account",
+        ToUserName: "@me",
+        MsgType: 49,
+        AppMsgType: 5,
+        Content: "<msg />",
+        CreateTime: 1_700_000_000
+      },
+      {
+        ...bot,
+        contacts: {
+          ...bot.contacts,
+          "@public-account": {
+            UserName: "@public-account"
+          }
+        }
+      }
+    );
+    const richMessage = normalizeWechat4uMessage(
+      {
+        MsgId: "public-2",
+        FromUserName: "@public-account",
+        ToUserName: "@me",
+        MsgType: 49,
+        AppMsgType: 5,
+        Content: "<msg />",
+        CreateTime: 1_700_000_000
+      },
+      {
+        ...bot,
+        contacts: {
+          ...bot.contacts,
+          "@public-account": {
+            UserName: "@public-account",
+            NickName: "Public Account"
+          }
+        }
+      }
+    );
+
+    expect(sparseMessage?.conversation.id).toBe(richMessage?.conversation.id);
+    expect(richMessage?.conversation.title).toBe("Public Account");
+  });
+
   it("keeps unknown unsupported peer messages visible", () => {
     const message = normalizeWechat4uMessage(
       {
