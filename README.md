@@ -1,10 +1,10 @@
 # wechat-tui
 
-A lightweight pi-tui WeChat TUI workspace based on the Web WeChat protocol.
+一个在终端里使用的微信消息工具，基于 Web 微信协议实现。
 
-## Install
+## 安装
 
-Requires Node.js `>=22.19.0`.
+需要 Node.js `>=22.19.0`。
 
 ```bash
 npm install
@@ -12,82 +12,98 @@ npm run build
 npm link
 ```
 
-## Run
+## 启动
 
 ```bash
 wechat-tui
 ```
 
-Startup shows a QR login view. After login, the default screen is the recent conversation list rendered by `pi-tui`.
+启动后会显示二维码登录界面。登录成功后进入最近会话列表。
 
-By default, local data is stored in `~/.wechat-tui/wechat-tui.sqlite`. Contacts, conversations, messages, and unread counts are scoped to the logged-in account inside that database. You can override it:
+本地数据默认存放在 `~/.wechat-tui`：
+
+- 数据库：`~/.wechat-tui/wechat-tui.sqlite`
+- 调试日志：`~/.wechat-tui/logs/`
+
+联系人、会话、消息和未读计数会按当前登录账号隔离，避免同一台机器上的多个账号互相混用数据。
+
+可以通过参数修改数据目录或数据库路径：
 
 ```bash
 wechat-tui --data-dir ./.wechat-tui
 wechat-tui --db /tmp/wechat-tui.sqlite
 ```
 
-Enable detailed local debugging logs:
+开启本地调试日志：
 
 ```bash
 wechat-tui --debug
 ```
 
-Debug logs are written to `~/.wechat-tui/logs/wechat-tui-<timestamp>-<pid>.log`. They include protocol state changes, message normalization summaries, command routing, store reads/writes, and error details. Login session data and protocol cookie fields are redacted.
+日志文件路径形如：
 
-For local smoke testing without WeChat login:
+```text
+~/.wechat-tui/logs/wechat-tui-<timestamp>-<pid>.log
+```
+
+日志会记录协议状态变化、消息解析摘要、界面路由、数据库读写和错误信息。登录会话和 cookie 等敏感字段会被脱敏。
+
+本地冒烟测试可以使用 mock 协议，不需要微信登录：
 
 ```bash
 wechat-tui --mock
 ```
 
-## Keyboard Controls
+## 快捷键
 
-Conversation list:
-
-```text
-text       filter local recent conversations
-Backspace  delete filter text
-Up/Down    select conversation
-Enter      open selected conversation
-/contacts  open contact search
-Esc/q      quit when the filter is empty
-```
-
-Chat view:
+最近会话列表：
 
 ```text
-Chat >     compose message in the pi-tui Editor
-Enter      send message
-Esc        return to conversation list
-Up/Down    navigate input history
-/contacts  open contact search
+输入文字    过滤最近会话
+Backspace   删除过滤文本
+↑/↓         选择会话
+Enter       打开选中的会话
+Esc/q       退出
 ```
 
-Contact search:
+聊天页面：
 
 ```text
-Search >   update search keyword
-Backspace  delete search text
-Up/Down    select result
-Enter      open selected contact or group
-Esc        return to previous view
+输入文字    编辑消息
+Enter       发送消息
+↑/↓         滚动消息列表
+Esc         返回最近会话列表
 ```
 
-Slash commands available from the chat editor and conversation command line:
+联系人搜索：
 
 ```text
-/contacts  search contacts and groups
-/chats     return to recent chats
-/status    show connection status
-/refresh   refresh local contacts
-/load      load local history
-/messages  search local messages
-/quit      quit
+输入文字    搜索联系人和群聊
+Backspace   删除搜索文本
+↑/↓         选择结果
+Enter       打开选中的联系人或群聊
+Esc         返回上一页
 ```
 
-Messages never print directly to the terminal. Protocol events are saved to the local store first, runtime state is rebuilt, and `pi-tui` repaints the active view. New messages in the active chat appear in that chat; new messages from other chats only update unread state and the bottom status bar. Non-text messages render as placeholders such as `[image]`, `[voice]`, `[video]`, `[file] filename`, `[mini-program]`, `[sticker]`, or `[unsupported message]`.
+聊天输入框支持的命令：
 
-## Notes
+```text
+/contacts  搜索联系人和群聊
+/chats     返回最近会话列表
+/status    显示连接状态
+/refresh   刷新联系人
+/load      显示本地历史状态
+/quit      退出
+```
 
-This project uses `wechat4u` and the Web WeChat protocol. Web WeChat access is unofficial, may fail for some accounts, and should be treated as a personal tool or technical prototype rather than a commercial stability guarantee.
+## 消息行为
+
+收到的新消息会先写入本地数据库，再刷新当前界面。当前聊天里的新消息会直接显示在聊天页面；其他会话的新消息会更新未读状态和底部状态栏。
+
+公众号会话会在最近会话列表中折叠为一项 `公众号`。公众号消息会保存到本地数据库，但不会进入未读列表，也不会触发未读提醒。
+
+图片、语音、视频、文件、小程序、表情等非文本消息会显示为占位符，例如 `[image]`、`[voice]`、`[video]`、`[file] filename`、`[mini-program]`、`[sticker]` 或 `[unsupported]`。
+
+## 注意事项
+
+本项目使用 `wechat4u` 和 Web 微信协议。Web 微信访问不是官方开放能力，部分账号可能无法登录或在运行中断开连接。

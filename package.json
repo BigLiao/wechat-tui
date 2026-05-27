@@ -1,7 +1,7 @@
 {
   "name": "wechat-tui",
   "version": "0.1.0",
-  "description": "A pi-tui terminal WeChat message workspace.",
+  "description": "A terminal client for WeChat.",
   "type": "module",
   "bin": {
     "wechat-tui": "./dist/index.js"
