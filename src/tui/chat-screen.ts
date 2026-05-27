@@ -1,6 +1,6 @@
-import { colors, fit, fillLines } from "./theme.js";
+import { theme, fit, fillLines } from "./theme.js";
 import { Header } from "./components/header.js";
-import { StatusBar, chatHints } from "./components/status-bar.js";
+import { StatusBar, HINTS_CHAT } from "./components/status-bar.js";
 import { MessageList } from "./components/message-list.js";
 import { ChatEditor } from "./components/chat-editor.js";
 import type { RenderState } from "../types.js";
@@ -13,27 +13,30 @@ export class ChatScreen {
   constructor(private readonly editor: ChatEditor) {}
 
   render(state: RenderState, width: number, rows: number): string[] {
-    // Fixed top: header
-    const headerLines = this.header.render(state, state.activeConversation?.title ?? "Chat", width);
+    // Fixed top: header with conversation title as subtitle
+    const headerLines = this.header.render(state, state.activeConversation?.title ?? "", width);
 
     // Error messages
     const errorLines: string[] = [];
     if (state.errorMessage) {
-      errorLines.push(fit(`  ${colors.error(state.errorMessage)}`, width));
+      errorLines.push(fit(`  ${theme.error(state.errorMessage)}`, width));
     }
 
-    // Content: messages + unread summary
+    // Content: messages
     const contentLines = this.messages.render(state, width, rows);
+
+    // Unread from other conversations
     const otherUnread = unreadSummary(state);
     if (otherUnread) {
       contentLines.push("");
-      contentLines.push(fit(`  ${colors.muted(otherUnread)}`, width));
+      contentLines.push(fit(`  ${theme.dim(otherUnread)}`, width));
     }
 
     // Fixed bottom: status bar + editor
     const editorLines = this.editor.render(width);
+    const unreadText = state.totalUnreadCount > 0 ? `${state.totalUnreadCount} unread` : "";
     const bottomLines: string[] = [];
-    bottomLines.push(this.statusBar.render(state, chatHints(), width));
+    bottomLines.push(this.statusBar.render(state, HINTS_CHAT, width, unreadText));
     bottomLines.push(...editorLines);
 
     // Layout: header → fill → error + content → bottom (bottom-aligned)

@@ -1,7 +1,7 @@
 import { SelectList } from "@earendil-works/pi-tui";
 import type { Component, SelectItem, SelectListTheme, TUI } from "@earendil-works/pi-tui";
 import type { RenderState, UiEvent } from "../types.js";
-import { colors } from "./theme.js";
+import { theme } from "./theme.js";
 import { LoginScreen } from "./login-screen.js";
 import { ConversationScreen } from "./conversation-screen.js";
 import { ChatScreen } from "./chat-screen.js";
@@ -11,11 +11,11 @@ import { ChatEditor } from "./components/chat-editor.js";
 const SEARCH_ITEM_VALUE = "__search__";
 
 const selectListTheme: SelectListTheme = {
-  selectedPrefix: (text) => colors.primary(text),
-  selectedText: (text) => colors.primary(text),
-  description: (text) => colors.muted(text),
-  scrollInfo: (text) => colors.muted(text),
-  noMatch: (text) => colors.muted(text)
+  selectedPrefix: (text) => theme.accent(text),
+  selectedText: (text) => theme.accent(text),
+  description: (text) => theme.dim(text),
+  scrollInfo: (text) => theme.dim(text),
+  noMatch: (text) => theme.dim(text)
 };
 
 function emptyState(): RenderState {

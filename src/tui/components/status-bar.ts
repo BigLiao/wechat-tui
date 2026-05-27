@@ -1,43 +1,26 @@
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { colors, fit } from "../theme.js";
+import { theme, fit, keyHint, SYM } from "../theme.js";
 import type { RenderState } from "../../types.js";
 
 /**
- * Bottom status bar with key hints (left) and unread count (right).
- * Uses plain dim text to avoid ANSI nesting issues.
+ * Status bar — bottom line with key hints and unread badge.
+ * Uses dim separator dots between hints. Single dim color, no nesting.
  */
 export class StatusBar {
-  render(state: RenderState, hints: string, width: number): string {
-    const unreadCount = state.totalUnreadCount;
-    const rightText = unreadCount > 0 ? `${unreadCount} unread` : "";
-    const rightWidth = visibleWidth(rightText);
-
-    const availableForHints = Math.max(1, width - rightWidth - 2);
-    const hintsFormatted = fit(` ${hints}`, availableForHints, true);
-
-    const rightFormatted = rightWidth > 0 ? `${rightText} ` : " ";
-
-    // Build as plain text first, then apply single dim style
-    const plainLine = `${hintsFormatted}${rightFormatted}`;
-    return colors.muted(fit(plainLine, width, true));
+  render(_state: RenderState, hints: string[], width: number, rightText = ""): string {
+    const sep = ` ${theme.dim(SYM.bullet)} `;
+    const left = " " + hints.join(sep);
+    const rightWidth = rightText ? visibleWidth(rightText) + 2 : 0;
+    const leftWidth = Math.max(1, width - rightWidth);
+    const leftFormatted = fit(left, leftWidth, true);
+    const rightFormatted = rightText ? `${rightText} ` : "";
+    return theme.muted(fit(`${leftFormatted}${rightFormatted}`, width, true));
   }
 }
 
-/**
- * Format status bar hints for each view.
- */
-export function conversationHints(): string {
-  return "↑↓ Select  ⏎ Open  / Cmd  ⎋ Quit";
-}
+// ─── Hint sets per view ───────────────────────────────────────────────────────
 
-export function chatHints(): string {
-  return "⏎ Send  ⎋ Back  ↑↓ History";
-}
-
-export function contactSearchHints(): string {
-  return "↑↓ Select  ⏎ Open  ⎋ Back";
-}
-
-export function loginHints(): string {
-  return "Scan QR to login  q Quit";
-}
+export const HINTS_CONVERSATION = ["↑↓ select", "⏎ open", "⎋ quit"];
+export const HINTS_CHAT = ["⏎ send", "⎋ back", "↑↓ history"];
+export const HINTS_SEARCH = ["↑↓ select", "⏎ open", "⎋ back"];
+export const HINTS_LOGIN = ["scan QR to login", "q quit"];

@@ -4,7 +4,7 @@ import {
   Editor
 } from "@earendil-works/pi-tui";
 import type { Component, EditorTheme, SelectListTheme, TUI } from "@earendil-works/pi-tui";
-import { colors } from "../theme.js";
+import { theme, border } from "../theme.js";
 import type { UiEvent } from "../../types.js";
 
 const COMMANDS = [
@@ -18,21 +18,21 @@ const COMMANDS = [
 ];
 
 const selectListTheme: SelectListTheme = {
-  selectedPrefix: (text) => colors.primary(text),
-  selectedText: (text) => colors.primary(text),
-  description: (text) => colors.muted(text),
-  scrollInfo: (text) => colors.muted(text),
-  noMatch: (text) => colors.muted(text)
+  selectedPrefix: (text) => theme.accent(text),
+  selectedText: (text) => theme.accent(text),
+  description: (text) => theme.dim(text),
+  scrollInfo: (text) => theme.dim(text),
+  noMatch: (text) => theme.dim(text)
 };
 
 const editorTheme: EditorTheme = {
-  borderColor: (text) => colors.muted(text),
+  borderColor: (text) => theme.border(text),
   selectList: selectListTheme
 };
 
 /**
- * Chat editor — a minimal input area fixed at the bottom.
- * Just a thin separator and the editor. No prefix labels.
+ * Chat editor — minimal input at the bottom.
+ * Separator line + pi-tui Editor.
  */
 export class ChatEditor implements Component {
   readonly focusTarget: Editor;

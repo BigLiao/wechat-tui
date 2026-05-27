@@ -47,7 +47,7 @@ describe("WorkbenchTerminalRenderer", () => {
     expect(output).toContain("Recent Chats");
     expect(output).toContain("Project A");
     expect(output).toContain("Alice: campaignId changed");
-    expect(output).toContain("/ Cmd");
+    expect(output).toContain("select");
   });
 
   it("renders only the active chat body and summarizes other unread conversations", () => {

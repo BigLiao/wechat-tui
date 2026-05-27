@@ -1,5 +1,5 @@
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { SYMBOLS, colors, fit, visiblePickerRows, windowItems } from "../theme.js";
+import { SYM, theme, fit, clamp } from "../theme.js";
 import type { ContactRecord, RenderState } from "../../types.js";
 
 /**
@@ -12,19 +12,19 @@ export class ContactPicker {
     // Search prompt
     const query = state.searchKeyword;
     const prompt = query
-      ? `${colors.muted("Search")} ${colors.primary(SYMBOLS.arrow)} ${query}`
-      : `${colors.muted("Search")} ${colors.primary(SYMBOLS.arrow)} ${colors.muted("type to search contacts...")}`;
+      ? `  ${theme.dim("search")} ${theme.accent("▸")} ${query}`
+      : `  ${theme.dim("type to search contacts…")}`;
     lines.push(fit(prompt, width));
     lines.push("");
 
-    const maxVisible = visiblePickerRows(rows);
+    const maxVisible = clamp(rows - 8, 3, 12);
     const windowed = windowItems(state.searchResults, state.selectedSearchIndex, maxVisible);
 
     if (state.searchResults.length === 0) {
       const empty = state.searchKeyword
         ? "No matches found."
         : "Type to search contacts and groups.";
-      lines.push(fit(`  ${colors.muted(empty)}`, width));
+      lines.push(fit(`  ${theme.dim(empty)}`, width));
       return lines;
     }
 
@@ -37,7 +37,7 @@ export class ContactPicker {
 
     if (state.searchResults.length > maxVisible) {
       const info = `${windowed.start + 1}-${windowed.start + windowed.items.length} of ${state.searchResults.length}`;
-      lines.push(fit(`  ${colors.muted(info)}`, width));
+      lines.push(fit(`  ${theme.dim(info)}`, width));
     }
 
     return lines;
@@ -45,33 +45,22 @@ export class ContactPicker {
 }
 
 function formatContactRow(contact: ContactRecord, selected: boolean, width: number): string {
-  // Selection marker
-  const marker = selected ? colors.primary(`${SYMBOLS.arrow} `) : "  ";
-
-  // Name
+  const marker = selected ? theme.accent(`${SYM.arrow} `) : "  ";
   const nameWidth = Math.max(12, Math.min(30, Math.floor(width * 0.4)));
-  const nameText = truncateToWidth(contact.displayName, nameWidth, "...", true);
-
-  // Kind badge
-  const kindBadge = formatKindBadge(contact.kind);
+  const nameText = truncateToWidth(contact.displayName, nameWidth, "…", true);
+  const kindBadge = theme.dim(`[${contact.kind}]`);
 
   if (selected) {
-    const row = `${colors.primary(`${SYMBOLS.arrow} `)}${colors.primaryBold(nameText)} ${kindBadge}`;
-    return fit(row, width);
+    return fit(`${marker}${theme.accentBold(nameText)} ${kindBadge}`, width);
   }
-  const row = `${marker}${nameText} ${kindBadge}`;
-  return fit(row, width);
+  return fit(`${marker}${nameText} ${kindBadge}`, width);
 }
 
-function formatKindBadge(kind: string): string {
-  switch (kind) {
-    case "group":
-      return colors.groupName("[group]");
-    case "private":
-      return colors.muted("[contact]");
-    case "public":
-      return colors.muted("[public]");
-    default:
-      return colors.muted(`[${kind}]`);
+function windowItems<T>(items: T[], selectedIndex: number, limit: number): { items: T[]; start: number } {
+  if (items.length <= limit) {
+    return { items, start: 0 };
   }
+  const selected = clamp(selectedIndex, 0, items.length - 1);
+  const start = clamp(selected - Math.floor(limit / 2), 0, Math.max(0, items.length - limit));
+  return { items: items.slice(start, start + limit), start };
 }

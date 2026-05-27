@@ -1,6 +1,6 @@
-import { colors, fit, fillLines } from "./theme.js";
+import { theme, fit, fillLines } from "./theme.js";
 import { Header } from "./components/header.js";
-import { StatusBar, contactSearchHints } from "./components/status-bar.js";
+import { StatusBar, HINTS_SEARCH } from "./components/status-bar.js";
 import { ContactPicker } from "./components/contact-picker.js";
 import type { RenderState } from "../types.js";
 
@@ -16,17 +16,18 @@ export class ContactSearchScreen {
     // Status / error messages
     const statusLines: string[] = [];
     if (state.statusMessage) {
-      statusLines.push(fit(`  ${colors.muted(state.statusMessage)}`, width));
+      statusLines.push(fit(`  ${theme.dim(state.statusMessage)}`, width));
     }
     if (state.errorMessage) {
-      statusLines.push(fit(`  ${colors.error(state.errorMessage)}`, width));
+      statusLines.push(fit(`  ${theme.error(state.errorMessage)}`, width));
     }
 
     // Content: contact picker
     const contentLines = this.picker.render(state, width, rows);
 
     // Fixed bottom: status bar
-    const bottomLines = [this.statusBar.render(state, contactSearchHints(), width)];
+    const resultCount = state.searchResults.length > 0 ? `${state.searchResults.length} results` : "";
+    const bottomLines = [this.statusBar.render(state, HINTS_SEARCH, width, resultCount)];
 
     // Layout: header → fill → status + content → bottom (bottom-aligned)
     const fixedCount = headerLines.length + statusLines.length + contentLines.length + bottomLines.length;

@@ -2,177 +2,134 @@ import chalk from "chalk";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { ConnectionState } from "../types.js";
 
-// ─── Color palette ────────────────────────────────────────────────────────────
+// ─── Theme ────────────────────────────────────────────────────────────────────
+// Color hierarchy: accent (primary) → text (default) → muted → dim
+// One accent dominates. Everything secondary uses muted/dim.
 
-export const colors = {
-  primary: chalk.cyan,
-  primaryBold: chalk.cyan.bold,
-  secondary: chalk.blue,
+export const theme = {
+  // Primary accent — used sparingly for active/important elements
+  accent: chalk.cyan,
+  accentBold: chalk.cyan.bold,
+
+  // Text — default content (no special styling needed, use raw string)
+  text: (s: string) => s,
+  bold: chalk.bold,
+
+  // Secondary — de-emphasized
+  muted: chalk.dim,
+  dim: chalk.gray,
+
+  // Semantic — status indicators only
   success: chalk.green,
   warning: chalk.yellow,
   error: chalk.red,
-  muted: chalk.dim,
-  mutedItalic: chalk.dim.italic,
-  bold: chalk.bold,
-  white: chalk.white,
-  whiteBold: chalk.white.bold,
-  selfName: chalk.cyan,
-  otherName: chalk.magenta,
-  groupName: chalk.yellow,
-  highlight: chalk.bgCyan.black,
-  selectedBg: chalk.inverse
+
+  // Structural
+  border: chalk.dim,
+  borderAccent: chalk.cyan,
+
+  // Message senders
+  selfName: chalk.cyan.bold,
+  otherName: chalk.bold,
 };
 
-// ─── Box-drawing characters ───────────────────────────────────────────────────
+// ─── Box-drawing ──────────────────────────────────────────────────────────────
 
 export const BOX = {
-  topLeft: "╭",
-  topRight: "╮",
-  bottomLeft: "╰",
-  bottomRight: "╯",
-  horizontal: "─",
-  vertical: "│",
-  teeRight: "├",
-  teeLeft: "┤",
-  cross: "┼",
-  lightHorizontal: "┈",
-  thinVertical: "│",
-  cornerTopLeft: "┌",
-  cornerBottomLeft: "└"
+  h: "─",       // horizontal
+  v: "│",       // vertical
+  tl: "╭",      // top-left
+  tr: "╮",      // top-right
+  bl: "╰",      // bottom-left
+  br: "╯",      // bottom-right
 } as const;
 
 // ─── Symbols ──────────────────────────────────────────────────────────────────
 
-export const SYMBOLS = {
+export const SYM = {
   dot: "●",
   circle: "○",
-  arrow: "›",
-  unread: "◆",
-  read: " ",
+  bullet: "·",
+  arrow: "▸",
   check: "✓",
-  separator: "│",
-  messageBorder: "│",
-  messageCorner: "┌",
-  ellipsis: "…"
 } as const;
 
-// ─── Connection state styling ─────────────────────────────────────────────────
+// ─── Connection state ─────────────────────────────────────────────────────────
 
-export function connectionDot(state: ConnectionState): string {
+export function connectionIndicator(state: ConnectionState): string {
   switch (state) {
     case "online":
     case "idle":
-      return colors.success(SYMBOLS.dot);
+      return theme.success(`${SYM.dot} Online`);
     case "syncing":
+      return theme.warning(`${SYM.dot} Syncing`);
     case "reconnecting":
+      return theme.warning(`${SYM.dot} Reconnecting`);
     case "waiting_scan":
+      return theme.warning(`${SYM.circle} Scan QR`);
     case "waiting_confirm":
-      return colors.warning(SYMBOLS.dot);
+      return theme.warning(`${SYM.circle} Confirm`);
     case "error":
+      return theme.error(`${SYM.dot} Error`);
     case "offline":
     case "logout":
-      return colors.error(SYMBOLS.dot);
+      return theme.error(`${SYM.circle} Offline`);
     default:
-      return colors.muted(SYMBOLS.circle);
+      return theme.dim(`${SYM.circle} Init`);
   }
 }
 
-export function connectionLabel(state: ConnectionState): string {
-  switch (state) {
-    case "online":
-      return "Online";
-    case "idle":
-      return "Ready";
-    case "syncing":
-      return "Syncing";
-    case "reconnecting":
-      return "Reconnecting";
-    case "waiting_scan":
-      return "Scan QR";
-    case "waiting_confirm":
-      return "Confirm";
-    case "error":
-      return "Error";
-    case "offline":
-      return "Offline";
-    case "logout":
-      return "Logged out";
-    default:
-      return "Init";
-  }
-}
+// ─── Layout primitives ────────────────────────────────────────────────────────
 
-// ─── Layout helpers ───────────────────────────────────────────────────────────
-
-/**
- * Truncate and optionally pad text to exactly `width` visible characters.
- */
+/** Truncate text to width, optionally pad with spaces */
 export function fit(text: string, width: number, pad = false): string {
   const maxWidth = Math.max(1, width);
-  const fitted = truncateToWidth(text, maxWidth, "...", pad);
+  const fitted = truncateToWidth(text, maxWidth, "…", pad);
   if (!pad || visibleWidth(fitted) >= maxWidth) {
     return fitted;
   }
   return `${fitted}${" ".repeat(maxWidth - visibleWidth(fitted))}`;
 }
 
-/**
- * Create a horizontal line/rule using box-drawing characters.
- */
-export function horizontalRule(width: number, style: (s: string) => string = colors.muted): string {
-  return style(BOX.horizontal.repeat(Math.max(0, width)));
+/** Horizontal border line */
+export function border(width: number): string {
+  return theme.border(BOX.h.repeat(Math.max(0, width)));
 }
 
-/**
- * Fill remaining terminal height with empty lines.
- */
+/** Fill with empty lines to reach target row count */
 export function fillLines(rows: number, used: number, reserved: number, width: number): string[] {
   const count = Math.max(0, rows - used - reserved);
   return Array.from({ length: count }, () => " ".repeat(Math.max(0, width)));
 }
 
-/**
- * Format relative time (e.g., "2m", "1h", "3d").
- */
+/** Right-pad a string to exact visible width */
+export function pad(text: string, width: number): string {
+  const vis = visibleWidth(text);
+  return text + " ".repeat(Math.max(0, width - vis));
+}
+
+/** Format key hint: dimmed "key action" */
+export function keyHint(key: string, action: string): string {
+  return `${theme.muted(key)} ${theme.dim(action)}`;
+}
+
+/** Relative time from timestamp */
 export function relativeTime(timestamp: number | undefined): string {
   if (!timestamp) return "";
-  const now = Date.now();
-  const diff = now - timestamp;
+  const diff = Date.now() - timestamp;
   if (diff < 0) return "";
-  const seconds = Math.floor(diff / 1000);
-  if (seconds < 60) return "now";
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h`;
-  const days = Math.floor(hours / 24);
-  if (days < 7) return `${days}d`;
-  const weeks = Math.floor(days / 7);
-  return `${weeks}w`;
+  const s = Math.floor(diff / 1000);
+  if (s < 60) return "now";
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h`;
+  const d = Math.floor(h / 24);
+  if (d < 7) return `${d}d`;
+  return `${Math.floor(d / 7)}w`;
 }
 
-/**
- * Clamp a number between min and max.
- */
+/** Clamp value between min and max */
 export function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max);
-}
-
-/**
- * Calculate max visible picker items based on terminal height.
- */
-export function visiblePickerRows(rows: number): number {
-  return clamp(rows - 10, 5, 12);
-}
-
-/**
- * Window a list around the selected index.
- */
-export function windowItems<T>(items: T[], selectedIndex: number, limit: number): { items: T[]; start: number } {
-  if (items.length <= limit) {
-    return { items, start: 0 };
-  }
-  const selected = clamp(selectedIndex, 0, items.length - 1);
-  const start = clamp(selected - Math.floor(limit / 2), 0, Math.max(0, items.length - limit));
-  return { items: items.slice(start, start + limit), start };
 }

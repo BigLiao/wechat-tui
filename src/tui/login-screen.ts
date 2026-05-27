@@ -1,7 +1,7 @@
 import qrcode from "qrcode-terminal";
-import { colors, fit, fillLines } from "./theme.js";
+import { theme, fit, fillLines } from "./theme.js";
 import { Header } from "./components/header.js";
-import { StatusBar, loginHints } from "./components/status-bar.js";
+import { StatusBar, HINTS_LOGIN } from "./components/status-bar.js";
 import type { ProtocolQrEvent, RenderState } from "../types.js";
 
 export class LoginScreen {
@@ -15,26 +15,26 @@ export class LoginScreen {
     // Content
     const contentLines: string[] = [];
     if (state.statusMessage) {
-      contentLines.push(fit(`  ${colors.muted(state.statusMessage)}`, width));
+      contentLines.push(fit(`  ${theme.dim(state.statusMessage)}`, width));
     }
     if (state.errorMessage) {
-      contentLines.push(fit(`  ${colors.error(state.errorMessage)}`, width));
+      contentLines.push(fit(`  ${theme.error(state.errorMessage)}`, width));
     }
     if (state.debugLogPath) {
-      contentLines.push(fit(`  ${colors.muted(`debug: ${state.debugLogPath}`)}`, width));
+      contentLines.push(fit(`  ${theme.dim(`debug: ${state.debugLogPath}`)}`, width));
     }
     contentLines.push("");
 
     if (state.qr) {
-      contentLines.push(fit(`  ${colors.muted("Scan with WeChat:")} ${colors.primary(state.qr.qrUrl)}`, width));
+      contentLines.push(fit(`  ${theme.dim("Scan with WeChat:")} ${theme.accent(state.qr.qrUrl)}`, width));
       contentLines.push("");
       contentLines.push(...qrLines(state.qr).map((line) => fit(`  ${line}`, width)));
     } else {
-      contentLines.push(fit(`  ${colors.muted("Waiting for login QR code...")}`, width));
+      contentLines.push(fit(`  ${theme.dim("Waiting for login QR code…")}`, width));
     }
 
     // Fixed bottom: status bar
-    const bottomLines = [this.statusBar.render(state, loginHints(), width)];
+    const bottomLines = [this.statusBar.render(state, HINTS_LOGIN, width)];
 
     // Layout: header → fill → content → bottom (bottom-aligned)
     const fixedCount = headerLines.length + contentLines.length + bottomLines.length;

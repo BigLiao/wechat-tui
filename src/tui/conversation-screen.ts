@@ -1,7 +1,7 @@
 import type { SelectList } from "@earendil-works/pi-tui";
-import { colors, fit, fillLines } from "./theme.js";
+import { theme, fit, fillLines, border } from "./theme.js";
 import { Header } from "./components/header.js";
-import { StatusBar, conversationHints } from "./components/status-bar.js";
+import { StatusBar, HINTS_CONVERSATION } from "./components/status-bar.js";
 import type { RenderState } from "../types.js";
 
 export class ConversationScreen {
@@ -15,18 +15,17 @@ export class ConversationScreen {
     // Status / error messages
     const statusLines: string[] = [];
     if (state.statusMessage) {
-      statusLines.push(fit(`  ${colors.muted(state.statusMessage)}`, width));
+      statusLines.push(fit(`  ${theme.dim(state.statusMessage)}`, width));
     }
     if (state.errorMessage) {
-      statusLines.push(fit(`  ${colors.error(state.errorMessage)}`, width));
+      statusLines.push(fit(`  ${theme.error(state.errorMessage)}`, width));
     }
 
     // Fixed bottom: status bar
-    const bottomLines = [this.statusBar.render(state, conversationHints(), width)];
+    const unreadText = state.totalUnreadCount > 0 ? `${state.totalUnreadCount} unread` : "";
+    const bottomLines = [this.statusBar.render(state, HINTS_CONVERSATION, width, unreadText)];
 
-    // Content: SelectList render, bottom-aligned inside a fixed-height region.
-    // SelectList can add/remove a scroll indicator, so the surrounding region
-    // must stay stable to avoid leaving stale rows during differential redraws.
+    // Content: SelectList render, bottom-aligned in fixed-height region
     const rawContentLines = selectList.render(width);
     const listAreaHeight = Math.max(1, rows - headerLines.length - statusLines.length - bottomLines.length);
     const contentLines =
