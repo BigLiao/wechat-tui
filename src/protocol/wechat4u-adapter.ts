@@ -150,7 +150,7 @@ export class Wechat4uAdapter extends EventEmitter implements WeChatProtocol {
   }
 
   getCurrentUser(): UserProfile | undefined {
-    return this.user;
+    return this.user ?? this.cacheCurrentUserFromBot(this.bot, "current user lookup");
   }
 
   getSessionData(): unknown | undefined {
@@ -189,8 +189,7 @@ export class Wechat4uAdapter extends EventEmitter implements WeChatProtocol {
     });
 
     bot.on("login", () => {
-      const currentUser = normalizeUser(bot.user);
-      this.user = currentUser;
+      const currentUser = this.cacheCurrentUserFromBot(bot, "login event") ?? normalizeUser(bot.user);
       this.options.logger?.info(
         {
           user: {
@@ -210,6 +209,7 @@ export class Wechat4uAdapter extends EventEmitter implements WeChatProtocol {
     });
 
     bot.on("contacts-updated", (contacts: RawContact[] | Record<string, RawContact>) => {
+      this.cacheCurrentUserFromBot(bot, "contacts update");
       const normalized = Array.isArray(contacts)
         ? contacts.map((contact) => normalizeContact(contact, bot.user))
         : Object.values(contacts).map((contact) => normalizeContact(contact, bot.user));
@@ -219,6 +219,7 @@ export class Wechat4uAdapter extends EventEmitter implements WeChatProtocol {
 
     bot.on("message", (message: RawMessage) => {
       try {
+        this.cacheCurrentUserFromBot(bot, "message event");
         this.options.logger?.debug({ raw: summarizeRawWechatMessage(message) }, "wechat4u raw message received");
         const normalized = normalizeWechat4uMessage(message, bot);
         if (normalized) {
@@ -228,7 +229,7 @@ export class Wechat4uAdapter extends EventEmitter implements WeChatProtocol {
           this.options.logger?.debug({ raw: summarizeRawWechatMessage(message) }, "wechat4u message dropped by adapter");
         }
       } catch (error) {
-        this.options.logger?.error({ error, message }, "failed to normalize wechat4u message");
+        this.options.logger?.error({ err: error, message }, "failed to normalize wechat4u message");
         this.emit("error", error instanceof Error ? error : new Error(String(error)));
       }
     });
@@ -241,10 +242,25 @@ export class Wechat4uAdapter extends EventEmitter implements WeChatProtocol {
 
     bot.on("error", (error: unknown) => {
       const normalizedError = error instanceof Error ? error : new Error(String(error));
-      this.options.logger?.error({ error }, "wechat4u error");
+      this.options.logger?.error({ err: normalizedError }, "wechat4u error");
       this.emit("state", "error" satisfies ConnectionState);
       this.emit("error", normalizedError);
     });
+  }
+
+  private cacheCurrentUserFromBot(bot: RawWechatBot | undefined, source: string): UserProfile | undefined {
+    if (!bot?.user) {
+      return this.user;
+    }
+    const currentUser = normalizeUser(bot.user);
+    if (!this.user || this.user.id !== currentUser.id) {
+      this.user = currentUser;
+      this.options.logger?.debug(
+        { source, user: { id: currentUser.id, protocolId: currentUser.protocolId, displayName: currentUser.displayName } },
+        "cached current wechat user"
+      );
+    }
+    return this.user;
   }
 }
 

@@ -20,7 +20,7 @@ wechat-tui
 
 Startup shows a QR login view. After login, the default screen is the recent conversation list rendered by `pi-tui`.
 
-By default, local data is stored in `~/.wechat-tui/wechat-tui.sqlite`. You can override it:
+By default, local data is stored in `~/.wechat-tui/wechat-tui.sqlite`. Contacts, conversations, messages, and unread counts are scoped to the logged-in account inside that database. You can override it:
 
 ```bash
 wechat-tui --data-dir ./.wechat-tui

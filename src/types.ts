@@ -185,6 +185,8 @@ export interface SearchResult {
 
 export interface MessageStore {
   close(): void;
+  setActiveAccount(account: UserProfile): void;
+  clearActiveAccount(): void;
   getSessionData(): unknown | undefined;
   setSessionData(data: unknown): void;
   clearSessionData(): void;

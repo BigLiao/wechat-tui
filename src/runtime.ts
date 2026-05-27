@@ -20,6 +20,7 @@ import type {
   RenderState,
   UiEvent,
   UiKey,
+  UserProfile,
   WeChatProtocol,
   WorkbenchRenderer
 } from "./types.js";
@@ -50,6 +51,7 @@ export class WeChatRuntime extends EventEmitter {
   private statusMessage?: string;
   private errorMessage?: string;
   private accountName?: string;
+  private activeAccountId?: string;
   private qr?: RenderState["qr"];
   private exiting = false;
 
@@ -123,7 +125,7 @@ export class WeChatRuntime extends EventEmitter {
         await this.submitChatText(event.text);
       }
     } catch (error) {
-      this.options.logger?.error({ error, eventType: event.type, view: this.view }, "failed to handle UI event");
+      this.options.logger?.error({ err: error, eventType: event.type, view: this.view }, "failed to handle UI event");
       this.errorMessage = error instanceof Error ? error.message : String(error);
     } finally {
       if (!this.exiting) {
@@ -159,7 +161,7 @@ export class WeChatRuntime extends EventEmitter {
           break;
       }
     } catch (error) {
-      this.options.logger?.error({ error, key, view: this.view }, "failed to handle key");
+      this.options.logger?.error({ err: error, key, view: this.view }, "failed to handle key");
       this.errorMessage = error instanceof Error ? error.message : String(error);
     } finally {
       if (!this.exiting) {
@@ -193,6 +195,7 @@ export class WeChatRuntime extends EventEmitter {
     });
 
     this.protocol.on("login", (user) => {
+      this.activateAccount(user);
       this.accountName = user.displayName;
       this.qr = undefined;
       this.view = "chats";
@@ -207,7 +210,11 @@ export class WeChatRuntime extends EventEmitter {
 
     this.protocol.on("contacts", (contacts) => {
       this.options.logger?.debug(summarizeContacts(contacts), "runtime received contacts");
-      this.store.upsertContacts(contacts);
+      if (!this.ensureActiveAccount("contacts")) {
+        this.options.logger?.warn({ count: contacts.length }, "dropping contacts received before account is known");
+        return;
+      }
+      this.store.upsertContacts(contacts.map((contact) => this.scopeContact(contact)));
       this.persistSessionData();
       if (this.view === "search") {
         this.clampSearchSelection();
@@ -217,6 +224,10 @@ export class WeChatRuntime extends EventEmitter {
 
     this.protocol.on("message", (message) => {
       this.options.logger?.debug({ message: summarizeIncomingMessage(message) }, "runtime received protocol message");
+      if (!this.ensureActiveAccount("message")) {
+        this.options.logger?.warn({ message: summarizeIncomingMessage(message) }, "dropping message received before account is known");
+        return;
+      }
       this.handleIncomingMessage(message);
       this.render();
     });
@@ -224,6 +235,8 @@ export class WeChatRuntime extends EventEmitter {
     this.protocol.on("logout", () => {
       this.connectionState = "logout";
       this.accountName = undefined;
+      this.activeAccountId = undefined;
+      this.store.clearActiveAccount();
       this.statusMessage = "logged out. Use q to quit.";
       this.render();
     });
@@ -232,9 +245,68 @@ export class WeChatRuntime extends EventEmitter {
       this.connectionState = "error";
       this.errorMessage = error.message;
       this.statusMessage = "Use q to quit, or restart the CLI to reconnect.";
-      this.options.logger?.error({ error }, "runtime protocol error");
+      this.options.logger?.error({ err: error }, "runtime protocol error");
       this.render();
     });
+  }
+
+  private activateAccount(user: UserProfile): void {
+    const previousAccountId = this.activeAccountId;
+    this.activeAccountId = user.id;
+    this.store.setActiveAccount(user);
+    if (previousAccountId && previousAccountId !== user.id) {
+      this.activeConversationId = undefined;
+      this.selectedConversationIndex = 0;
+      this.selectedSearchIndex = 0;
+      this.searchKeyword = "";
+      this.conversationQuery = "";
+      this.chatInput = "";
+      this.chatHistoryIndex = -1;
+      this.conversationFocus = "list";
+    }
+  }
+
+  private ensureActiveAccount(reason: string): boolean {
+    if (this.activeAccountId) {
+      return true;
+    }
+    const user = this.protocol.getCurrentUser();
+    if (!user) {
+      this.options.logger?.warn({ reason }, "protocol event arrived before current account is known");
+      return false;
+    }
+    this.activateAccount(user);
+    return true;
+  }
+
+  private scopeIncomingMessage(incoming: IncomingProtocolMessage): IncomingProtocolMessage {
+    return {
+      ...incoming,
+      id: this.scopeId(incoming.id),
+      conversation: this.scopeConversation(incoming.conversation),
+      sender: this.scopeContact(incoming.sender)
+    };
+  }
+
+  private scopeConversation(conversation: ConversationInput): ConversationInput {
+    return {
+      ...conversation,
+      id: this.scopeId(conversation.id)
+    };
+  }
+
+  private scopeContact(contact: ContactInput): ContactInput {
+    return {
+      ...contact,
+      id: this.scopeId(contact.id)
+    };
+  }
+
+  private scopeId(id: string): string {
+    if (!this.activeAccountId) {
+      throw new Error("Cannot store account-scoped data before login");
+    }
+    return `${this.activeAccountId}:${id}`;
   }
 
   private async handleLoginKey(key: UiKey): Promise<void> {
@@ -364,7 +436,7 @@ export class WeChatRuntime extends EventEmitter {
         return;
       case "/refresh": {
         const contacts = await this.protocol.getContacts();
-        this.store.upsertContacts(contacts);
+        this.store.upsertContacts(contacts.map((contact) => this.scopeContact(contact)));
         this.persistSessionData();
         this.statusMessage = `refreshed ${contacts.length} contacts`;
         return;
@@ -567,10 +639,10 @@ export class WeChatRuntime extends EventEmitter {
       const now = Date.now();
       const currentUser = this.protocol.getCurrentUser();
       const message: MessageInput = {
-        id: sent.messageId ? `wechat:${sent.messageId}` : localMessageId([activeConversation.id, text, String(now)]),
+        id: this.scopeId(sent.messageId ? `wechat:${sent.messageId}` : localMessageId([activeConversation.id, text, String(now)])),
         protocolMessageId: sent.messageId,
         conversationId: activeConversation.id,
-        senderId: currentUser?.id,
+        senderId: currentUser ? this.scopeId(currentUser.id) : undefined,
         senderName: "You",
         isSelf: true,
         content: text,
@@ -587,40 +659,41 @@ export class WeChatRuntime extends EventEmitter {
         "active chat message sent"
       );
     } catch (error) {
-      this.options.logger?.error({ error, conversationId: activeConversation.id }, "failed to send message");
+      this.options.logger?.error({ err: error, conversationId: activeConversation.id }, "failed to send message");
       this.errorMessage = error instanceof Error ? error.message : String(error);
     }
   }
 
   private handleIncomingMessage(incoming: IncomingProtocolMessage): void {
-    this.store.upsertContact(contactFromConversationInput(incoming.conversation));
-    if (incoming.sender.id !== incoming.conversation.id || incoming.conversation.kind !== "group") {
-      this.store.upsertContact(incoming.sender);
+    const scopedIncoming = this.scopeIncomingMessage(incoming);
+    this.store.upsertContact(contactFromConversationInput(scopedIncoming.conversation));
+    if (scopedIncoming.sender.id !== scopedIncoming.conversation.id || scopedIncoming.conversation.kind !== "group") {
+      this.store.upsertContact(scopedIncoming.sender);
     }
-    const isActive = this.activeConversationId === incoming.conversation.id;
-    const incrementUnread = !incoming.isSelf && !isActive;
+    const isActive = this.activeConversationId === scopedIncoming.conversation.id;
+    const incrementUnread = !scopedIncoming.isSelf && !isActive;
     const saved = this.store.saveMessage(
       {
-        id: incoming.id,
-        protocolMessageId: incoming.protocolMessageId,
-        conversationId: incoming.conversation.id,
-        senderId: incoming.sender.id,
-        senderName: incoming.isSelf ? "You" : incoming.sender.displayName,
-        isSelf: incoming.isSelf,
-        content: incoming.content,
-        type: incoming.type,
-        timestamp: incoming.timestamp,
-        raw: incoming.raw
+        id: scopedIncoming.id,
+        protocolMessageId: scopedIncoming.protocolMessageId,
+        conversationId: scopedIncoming.conversation.id,
+        senderId: scopedIncoming.sender.id,
+        senderName: scopedIncoming.isSelf ? "You" : scopedIncoming.sender.displayName,
+        isSelf: scopedIncoming.isSelf,
+        content: scopedIncoming.content,
+        type: scopedIncoming.type,
+        timestamp: scopedIncoming.timestamp,
+        raw: scopedIncoming.raw
       },
-      incoming.conversation,
+      scopedIncoming.conversation,
       incrementUnread
     );
 
     if (isActive) {
-      this.store.markRead(incoming.conversation.id);
+      this.store.markRead(scopedIncoming.conversation.id);
       this.statusMessage = "new message";
     } else if (this.view === "chat" || this.view === "search") {
-      this.statusMessage = `new message from ${incoming.conversation.title}`;
+      this.statusMessage = `new message from ${scopedIncoming.conversation.title}`;
     } else {
       this.statusMessage = "recent chats updated";
     }

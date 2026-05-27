@@ -1,3 +1,4 @@
+import { EventEmitter } from "node:events";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -5,6 +6,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import { MockProtocol } from "../src/protocol/mock-protocol.js";
 import { WeChatRuntime } from "../src/runtime.js";
 import { SqliteStore } from "../src/store/sqlite-store.js";
+import type { ConnectionState, ContactInput, UserProfile, WeChatProtocol } from "../src/types.js";
+import { contactId } from "../src/util/ids.js";
 import { FakeRenderer, key } from "./helpers.js";
 
 const tempDirs: string[] = [];
@@ -21,6 +24,59 @@ async function pressText(runtime: WeChatRuntime, value: string): Promise<void> {
   }
 }
 
+class ContactsBeforeLoginProtocol extends EventEmitter implements WeChatProtocol {
+  private readonly self: ContactInput = {
+    id: contactId("self", ["early-self"]),
+    protocolId: "@early-self",
+    kind: "self",
+    displayName: "Early User",
+    isSelf: true
+  };
+
+  private readonly contacts: ContactInput[] = [
+    this.self,
+    {
+      id: contactId("private", ["early-boss"]),
+      protocolId: "@early-boss",
+      kind: "private",
+      displayName: "Early Boss"
+    }
+  ];
+
+  async start(): Promise<void> {
+    this.emit("state", "syncing" satisfies ConnectionState);
+    this.emit("contacts", this.contacts);
+    this.emit("state", "online" satisfies ConnectionState);
+    this.emit("login", this.getCurrentUser());
+  }
+
+  async reconnect(): Promise<void> {}
+
+  async logout(): Promise<void> {
+    this.emit("logout");
+  }
+
+  async sendText(): Promise<{ messageId?: string; raw?: unknown }> {
+    return {};
+  }
+
+  async getContacts(): Promise<ContactInput[]> {
+    return this.contacts;
+  }
+
+  getCurrentUser(): UserProfile {
+    return {
+      id: this.self.id,
+      protocolId: this.self.protocolId,
+      displayName: this.self.displayName
+    };
+  }
+
+  getSessionData(): unknown | undefined {
+    return undefined;
+  }
+}
+
 afterEach(() => {
   for (const dir of tempDirs.splice(0)) {
     rmSync(dir, { recursive: true, force: true });
@@ -28,6 +84,20 @@ afterEach(() => {
 });
 
 describe("WeChatRuntime", () => {
+  it("handles contacts that arrive before the login event during session restart", async () => {
+    const store = new SqliteStore(tempDb());
+    const protocol = new ContactsBeforeLoginProtocol();
+    const renderer = new FakeRenderer();
+    const runtime = new WeChatRuntime(protocol, store, renderer, { initialHistoryLimit: 10 });
+
+    await runtime.start();
+
+    expect(renderer.latest.view).toBe("chats");
+    expect(renderer.latest.accountName).toBe("Early User");
+    expect(store.searchContacts("Early Boss")).toHaveLength(1);
+    store.close();
+  });
+
   it("uses redraw state for chats, keyboard navigation, chat input, unread status, and search", async () => {
     const store = new SqliteStore(tempDb());
     const protocol = new MockProtocol();

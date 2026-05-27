@@ -13,7 +13,8 @@ import type {
   MessageKind,
   MessageRecord,
   MessageStore,
-  SearchResult
+  SearchResult,
+  UserProfile
 } from "../types.js";
 import {
   summarizeContacts,
@@ -28,6 +29,7 @@ const require = createRequire(import.meta.url);
 type SqliteModule = typeof import("node:sqlite");
 
 interface ContactRow {
+  account_id: string | null;
   id: string;
   protocol_id: string | null;
   kind: ContactKind;
@@ -41,6 +43,7 @@ interface ContactRow {
 }
 
 interface ConversationRow {
+  account_id: string | null;
   id: string;
   protocol_id: string | null;
   kind: ContactKind;
@@ -54,6 +57,7 @@ interface ConversationRow {
 }
 
 interface MessageRow {
+  account_id: string | null;
   id: string;
   conversation_id: string;
   protocol_message_id: string | null;
@@ -157,6 +161,7 @@ function asMessage(row: MessageRow): MessageRecord {
 
 export class SqliteStore implements MessageStore {
   private readonly db: DatabaseSync;
+  private activeAccountId?: string;
 
   constructor(
     private readonly dbPath: string,
@@ -173,6 +178,26 @@ export class SqliteStore implements MessageStore {
   close(): void {
     this.options.logger?.debug({ dbPath: this.dbPath }, "closing sqlite store");
     this.db.close();
+  }
+
+  setActiveAccount(account: UserProfile): void {
+    this.activeAccountId = account.id;
+    this.db
+      .prepare(
+        "INSERT INTO accounts (id, protocol_id, display_name, raw_json, updated_at) VALUES (?, ?, ?, ?, ?) " +
+          "ON CONFLICT(id) DO UPDATE SET protocol_id = excluded.protocol_id, display_name = excluded.display_name, " +
+          "raw_json = excluded.raw_json, updated_at = excluded.updated_at"
+      )
+      .run(account.id, account.protocolId ?? null, account.displayName, jsonString(account.raw), Date.now());
+    this.options.logger?.debug(
+      { accountId: account.id, protocolId: account.protocolId, displayName: account.displayName },
+      "active store account set"
+    );
+  }
+
+  clearActiveAccount(): void {
+    this.options.logger?.debug({ accountId: this.activeAccountId }, "active store account cleared");
+    this.activeAccountId = undefined;
   }
 
   getSessionData(): unknown | undefined {
@@ -203,18 +228,20 @@ export class SqliteStore implements MessageStore {
   }
 
   upsertContact(contact: ContactInput): ContactRecord {
+    const accountId = this.requireActiveAccountId("upsert contact");
     const now = Date.now();
     this.db
       .prepare(
         "INSERT INTO contacts " +
-          "(id, protocol_id, kind, display_name, remark_name, nick_name, alias, is_self, raw_json, updated_at) " +
-          "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
+          "(account_id, id, protocol_id, kind, display_name, remark_name, nick_name, alias, is_self, raw_json, updated_at) " +
+          "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
           "ON CONFLICT(id) DO UPDATE SET " +
-          "protocol_id = excluded.protocol_id, kind = excluded.kind, display_name = excluded.display_name, " +
+          "account_id = excluded.account_id, protocol_id = excluded.protocol_id, kind = excluded.kind, display_name = excluded.display_name, " +
           "remark_name = excluded.remark_name, nick_name = excluded.nick_name, alias = excluded.alias, " +
           "is_self = excluded.is_self, raw_json = excluded.raw_json, updated_at = excluded.updated_at"
       )
       .run(
+        accountId,
         contact.id,
         contact.protocolId ?? null,
         contact.kind,
@@ -255,27 +282,35 @@ export class SqliteStore implements MessageStore {
       return saved;
     } catch (error) {
       this.db.exec("ROLLBACK");
-      this.options.logger?.error({ error, count: contacts.length }, "failed to upsert contacts");
+      this.options.logger?.error({ err: error, count: contacts.length }, "failed to upsert contacts");
       throw error;
     }
   }
 
   listContacts(kind?: ContactKind, limit = 50): ContactRecord[] {
+    const accountId = this.currentAccountId();
+    if (!accountId) {
+      return [];
+    }
     const rows = kind
       ? (this.db
           .prepare(
-            "SELECT * FROM contacts WHERE kind = ? AND is_self = 0 ORDER BY display_name COLLATE NOCASE LIMIT ?"
+            "SELECT * FROM contacts WHERE account_id = ? AND kind = ? AND is_self = 0 ORDER BY display_name COLLATE NOCASE LIMIT ?"
           )
-          .all(kind, limit) as unknown as ContactRow[])
+          .all(accountId, kind, limit) as unknown as ContactRow[])
       : (this.db
-          .prepare("SELECT * FROM contacts WHERE is_self = 0 ORDER BY display_name COLLATE NOCASE LIMIT ?")
-          .all(limit) as unknown as ContactRow[]);
+          .prepare("SELECT * FROM contacts WHERE account_id = ? AND is_self = 0 ORDER BY display_name COLLATE NOCASE LIMIT ?")
+          .all(accountId, limit) as unknown as ContactRow[]);
     const contacts = rows.map(asContact);
     this.options.logger?.debug({ kind, limit, count: contacts.length }, "listed contacts");
     return contacts;
   }
 
   findContactByName(query: string): ContactRecord | undefined {
+    const accountId = this.currentAccountId();
+    if (!accountId) {
+      return undefined;
+    }
     const normalized = query.trim().toLowerCase();
     if (!normalized) {
       return undefined;
@@ -284,13 +319,14 @@ export class SqliteStore implements MessageStore {
     const row = this.db
       .prepare(
         "SELECT * FROM contacts WHERE is_self = 0 AND " +
+          "account_id = ? AND " +
           "(lower(display_name) = ? OR lower(remark_name) = ? OR lower(nick_name) = ? OR lower(alias) = ? " +
           "OR lower(display_name) LIKE ? OR lower(remark_name) LIKE ? OR lower(nick_name) LIKE ? OR lower(alias) LIKE ?) " +
           "ORDER BY CASE " +
           "WHEN lower(display_name) = ? THEN 0 WHEN lower(remark_name) = ? THEN 1 " +
           "WHEN lower(nick_name) = ? THEN 2 WHEN lower(alias) = ? THEN 3 ELSE 4 END, updated_at DESC LIMIT 1"
       )
-      .get(normalized, normalized, normalized, normalized, like, like, like, like, normalized, normalized, normalized, normalized) as
+      .get(accountId, normalized, normalized, normalized, normalized, like, like, like, like, normalized, normalized, normalized, normalized) as
       | ContactRow
       | undefined;
     const contact = row ? asContact(row) : undefined;
@@ -299,11 +335,15 @@ export class SqliteStore implements MessageStore {
   }
 
   searchContacts(keyword: string, limit = 20): ContactRecord[] {
+    const accountId = this.currentAccountId();
+    if (!accountId) {
+      return [];
+    }
     const normalized = keyword.trim().toLowerCase();
     const rows = normalized
       ? (this.db
           .prepare(
-            "SELECT * FROM contacts WHERE is_self = 0 AND kind IN ('private', 'group') AND " +
+            "SELECT * FROM contacts WHERE account_id = ? AND is_self = 0 AND kind IN ('private', 'group') AND " +
               "(lower(display_name) LIKE ? OR lower(remark_name) LIKE ? OR lower(nick_name) LIKE ? OR lower(alias) LIKE ?) " +
               "ORDER BY CASE " +
               "WHEN lower(display_name) = ? THEN 0 WHEN lower(remark_name) = ? THEN 1 " +
@@ -311,6 +351,7 @@ export class SqliteStore implements MessageStore {
               "display_name COLLATE NOCASE LIMIT ?"
           )
           .all(
+            accountId,
             `%${normalized}%`,
             `%${normalized}%`,
             `%${normalized}%`,
@@ -323,24 +364,25 @@ export class SqliteStore implements MessageStore {
           ) as unknown as ContactRow[])
       : (this.db
           .prepare(
-            "SELECT * FROM contacts WHERE is_self = 0 AND kind IN ('private', 'group') ORDER BY updated_at DESC, display_name COLLATE NOCASE LIMIT ?"
+            "SELECT * FROM contacts WHERE account_id = ? AND is_self = 0 AND kind IN ('private', 'group') ORDER BY updated_at DESC, display_name COLLATE NOCASE LIMIT ?"
           )
-          .all(limit) as unknown as ContactRow[]);
+          .all(accountId, limit) as unknown as ContactRow[]);
     const contacts = rows.map(asContact);
     this.options.logger?.debug({ keyword, limit, count: contacts.length }, "searched contacts");
     return contacts;
   }
 
   upsertConversation(conversation: ConversationInput): ConversationRecord {
+    const accountId = this.requireActiveAccountId("upsert conversation");
     this.options.logger?.trace({ conversation: summarizeConversationInput(conversation) }, "upserting conversation");
     const now = Date.now();
     this.db
       .prepare(
-        "INSERT INTO conversations (id, protocol_id, kind, title, unread_count, updated_at) VALUES (?, ?, ?, ?, 0, ?) " +
-          "ON CONFLICT(id) DO UPDATE SET protocol_id = excluded.protocol_id, kind = excluded.kind, " +
+        "INSERT INTO conversations (account_id, id, protocol_id, kind, title, unread_count, updated_at) VALUES (?, ?, ?, ?, ?, 0, ?) " +
+          "ON CONFLICT(id) DO UPDATE SET account_id = excluded.account_id, protocol_id = excluded.protocol_id, kind = excluded.kind, " +
           "title = excluded.title, updated_at = excluded.updated_at"
       )
-      .run(conversation.id, conversation.protocolId ?? null, conversation.kind, conversation.title, now);
+      .run(accountId, conversation.id, conversation.protocolId ?? null, conversation.kind, conversation.title, now);
 
     const saved = this.findConversationById(conversation.id);
     if (!saved) {
@@ -359,13 +401,23 @@ export class SqliteStore implements MessageStore {
   }
 
   findConversationById(id: string): ConversationRecord | undefined {
-    const row = this.db.prepare("SELECT * FROM conversations WHERE id = ?").get(id) as ConversationRow | undefined;
+    const accountId = this.currentAccountId();
+    if (!accountId) {
+      return undefined;
+    }
+    const row = this.db.prepare("SELECT * FROM conversations WHERE account_id = ? AND id = ?").get(accountId, id) as
+      | ConversationRow
+      | undefined;
     const conversation = row ? asConversation(row) : undefined;
     this.options.logger?.trace({ id, found: !!conversation }, "conversation lookup by id");
     return conversation;
   }
 
   findConversationByName(query: string): ConversationRecord | undefined {
+    const accountId = this.currentAccountId();
+    if (!accountId) {
+      return undefined;
+    }
     const normalized = query.trim().toLowerCase();
     if (!normalized) {
       return undefined;
@@ -373,16 +425,17 @@ export class SqliteStore implements MessageStore {
     const like = `%${normalized}%`;
     const row = this.db
       .prepare(
-        "SELECT * FROM conversations WHERE lower(title) = ? OR lower(title) LIKE ? " +
+        "SELECT * FROM conversations WHERE account_id = ? AND (lower(title) = ? OR lower(title) LIKE ?) " +
           "ORDER BY CASE WHEN lower(title) = ? THEN 0 ELSE 1 END, updated_at DESC LIMIT 1"
       )
-      .get(normalized, like, normalized) as ConversationRow | undefined;
+      .get(accountId, normalized, like, normalized) as ConversationRow | undefined;
     const conversation = row ? asConversation(row) : undefined;
     this.options.logger?.debug({ query, found: !!conversation, conversationId: conversation?.id }, "conversation lookup by name");
     return conversation;
   }
 
   saveMessage(message: MessageInput, conversation: ConversationInput, incrementUnread: boolean): MessageRecord {
+    const accountId = this.requireActiveAccountId("save message");
     this.options.logger?.debug(
       {
         message: summarizeMessageInput(message),
@@ -399,10 +452,11 @@ export class SqliteStore implements MessageStore {
       const insertResult = this.db
         .prepare(
           "INSERT OR IGNORE INTO messages " +
-            "(id, conversation_id, protocol_message_id, sender_id, sender_name, is_self, content, type, timestamp, raw_json, created_at) " +
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            "(account_id, id, conversation_id, protocol_message_id, sender_id, sender_name, is_self, content, type, timestamp, raw_json, created_at) " +
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         )
         .run(
+          accountId,
           message.id,
           message.conversationId,
           message.protocolMessageId ?? null,
@@ -422,7 +476,7 @@ export class SqliteStore implements MessageStore {
           .prepare(
             "UPDATE conversations SET last_message_preview = ?, last_message_at = ?, " +
               "last_message_sender_name = ?, last_message_is_self = ?, " +
-              "unread_count = unread_count + ?, updated_at = ? WHERE id = ?"
+              "unread_count = unread_count + ?, updated_at = ? WHERE account_id = ? AND id = ?"
           )
           .run(
             message.content,
@@ -431,6 +485,7 @@ export class SqliteStore implements MessageStore {
             message.isSelf ? 1 : 0,
             incrementUnread ? 1 : 0,
             now,
+            accountId,
             conversation.id
           );
       }
@@ -440,7 +495,7 @@ export class SqliteStore implements MessageStore {
       this.db.exec("ROLLBACK");
       this.options.logger?.error(
         {
-          error,
+          err: error,
           message: summarizeMessageInput(message),
           conversation: summarizeConversationInput(conversation)
         },
@@ -465,41 +520,57 @@ export class SqliteStore implements MessageStore {
   }
 
   listRecentConversations(limit = 20): ConversationRecord[] {
+    const accountId = this.currentAccountId();
+    if (!accountId) {
+      return [];
+    }
     const rows = this.db
       .prepare(
-        "SELECT * FROM conversations ORDER BY last_message_at IS NULL ASC, last_message_at DESC, updated_at DESC LIMIT ?"
+        "SELECT * FROM conversations WHERE account_id = ? ORDER BY last_message_at IS NULL ASC, last_message_at DESC, updated_at DESC LIMIT ?"
       )
-      .all(limit) as unknown as ConversationRow[];
+      .all(accountId, limit) as unknown as ConversationRow[];
     const conversations = rows.map(asConversation);
     this.options.logger?.debug({ limit, count: conversations.length }, "listed recent conversations");
     return conversations;
   }
 
   listUnreadConversations(limit = 20): ConversationRecord[] {
+    const accountId = this.currentAccountId();
+    if (!accountId) {
+      return [];
+    }
     const rows = this.db
       .prepare(
-        "SELECT * FROM conversations WHERE unread_count > 0 ORDER BY last_message_at DESC, updated_at DESC LIMIT ?"
+        "SELECT * FROM conversations WHERE account_id = ? AND unread_count > 0 ORDER BY last_message_at DESC, updated_at DESC LIMIT ?"
       )
-      .all(limit) as unknown as ConversationRow[];
+      .all(accountId, limit) as unknown as ConversationRow[];
     const conversations = rows.map(asConversation);
     this.options.logger?.debug({ limit, count: conversations.length }, "listed unread conversations");
     return conversations;
   }
 
   listMessages(conversationId: string, limit = 30): MessageRecord[] {
+    const accountId = this.currentAccountId();
+    if (!accountId) {
+      return [];
+    }
     const rows = this.db
       .prepare(
         "SELECT * FROM (" +
-          "SELECT * FROM messages WHERE conversation_id = ? ORDER BY timestamp DESC, created_at DESC LIMIT ?" +
+          "SELECT * FROM messages WHERE account_id = ? AND conversation_id = ? ORDER BY timestamp DESC, created_at DESC LIMIT ?" +
           ") ORDER BY timestamp ASC, created_at ASC"
       )
-      .all(conversationId, limit) as unknown as MessageRow[];
+      .all(accountId, conversationId, limit) as unknown as MessageRow[];
     const messages = rows.map(asMessage);
     this.options.logger?.debug({ conversationId, limit, count: messages.length }, "listed messages");
     return messages;
   }
 
   searchMessages(keyword: string, limit = 50, conversationId?: string): SearchResult[] {
+    const accountId = this.currentAccountId();
+    if (!accountId) {
+      return [];
+    }
     const normalized = keyword.trim();
     if (!normalized) {
       return [];
@@ -508,13 +579,13 @@ export class SqliteStore implements MessageStore {
     const rows = conversationId
       ? (this.db
           .prepare(
-            "SELECT * FROM messages WHERE conversation_id = ? AND content LIKE ? " +
+            "SELECT * FROM messages WHERE account_id = ? AND conversation_id = ? AND content LIKE ? " +
               "ORDER BY timestamp DESC, created_at DESC LIMIT ?"
           )
-          .all(conversationId, like, limit) as unknown as MessageRow[])
+          .all(accountId, conversationId, like, limit) as unknown as MessageRow[])
       : (this.db
-          .prepare("SELECT * FROM messages WHERE content LIKE ? ORDER BY timestamp DESC, created_at DESC LIMIT ?")
-          .all(like, limit) as unknown as MessageRow[]);
+          .prepare("SELECT * FROM messages WHERE account_id = ? AND content LIKE ? ORDER BY timestamp DESC, created_at DESC LIMIT ?")
+          .all(accountId, like, limit) as unknown as MessageRow[]);
 
     const results = rows.flatMap((row) => {
       const conversation = this.findConversationById(row.conversation_id);
@@ -536,12 +607,22 @@ export class SqliteStore implements MessageStore {
   }
 
   markRead(conversationId: string): void {
+    const accountId = this.currentAccountId();
+    if (!accountId) {
+      return;
+    }
     this.options.logger?.debug({ conversationId }, "marking conversation read");
-    this.db.prepare("UPDATE conversations SET unread_count = 0, updated_at = ? WHERE id = ?").run(Date.now(), conversationId);
+    this.db
+      .prepare("UPDATE conversations SET unread_count = 0, updated_at = ? WHERE account_id = ? AND id = ?")
+      .run(Date.now(), accountId, conversationId);
   }
 
   totalUnreadCount(): number {
-    const row = this.db.prepare("SELECT COALESCE(SUM(unread_count), 0) AS total FROM conversations").get() as
+    const accountId = this.currentAccountId();
+    if (!accountId) {
+      return 0;
+    }
+    const row = this.db.prepare("SELECT COALESCE(SUM(unread_count), 0) AS total FROM conversations WHERE account_id = ?").get(accountId) as
       | { total: number }
       | undefined;
     const total = Number(row?.total ?? 0);
@@ -550,39 +631,55 @@ export class SqliteStore implements MessageStore {
   }
 
   private findContactById(id: string): ContactRecord | undefined {
-    const row = this.db.prepare("SELECT * FROM contacts WHERE id = ?").get(id) as ContactRow | undefined;
+    const accountId = this.currentAccountId();
+    if (!accountId) {
+      return undefined;
+    }
+    const row = this.db.prepare("SELECT * FROM contacts WHERE account_id = ? AND id = ?").get(accountId, id) as
+      | ContactRow
+      | undefined;
     return row ? asContact(row) : undefined;
   }
 
   private findMessageById(id: string): MessageRecord | undefined {
-    const row = this.db.prepare("SELECT * FROM messages WHERE id = ?").get(id) as MessageRow | undefined;
+    const accountId = this.currentAccountId();
+    if (!accountId) {
+      return undefined;
+    }
+    const row = this.db.prepare("SELECT * FROM messages WHERE account_id = ? AND id = ?").get(accountId, id) as
+      | MessageRow
+      | undefined;
     return row ? asMessage(row) : undefined;
   }
 
   private backfillSenderNameFromContact(contact: ContactRecord): void {
+    const accountId = this.currentAccountId();
+    if (!accountId) {
+      return;
+    }
     if (!contact.protocolId || contact.isSelf || !isUsefulSenderName(contact.displayName)) {
       return;
     }
 
     const result = this.db
       .prepare(
-        "UPDATE messages SET sender_name = ? WHERE sender_id IN (" +
-          "SELECT id FROM contacts WHERE protocol_id = ? AND " +
+        "UPDATE messages SET sender_name = ? WHERE account_id = ? AND sender_id IN (" +
+          "SELECT id FROM contacts WHERE account_id = ? AND protocol_id = ? AND " +
           "(display_name = 'Unknown' OR display_name = 'Group member' OR display_name LIKE '@%')" +
           ") AND (sender_name = 'Unknown' OR sender_name = 'Group member' OR sender_name LIKE '@%')"
       )
-      .run(contact.displayName, contact.protocolId);
+      .run(contact.displayName, accountId, accountId, contact.protocolId);
 
     this.db
       .prepare(
-        "UPDATE conversations SET last_message_sender_name = ? WHERE id IN (" +
-          "SELECT conversation_id FROM messages WHERE sender_id IN (" +
-          "SELECT id FROM contacts WHERE protocol_id = ? AND " +
+        "UPDATE conversations SET last_message_sender_name = ? WHERE account_id = ? AND id IN (" +
+          "SELECT conversation_id FROM messages WHERE account_id = ? AND sender_id IN (" +
+          "SELECT id FROM contacts WHERE account_id = ? AND protocol_id = ? AND " +
           "(display_name = 'Unknown' OR display_name = 'Group member' OR display_name LIKE '@%')" +
           ")" +
           ") AND (last_message_sender_name = 'Unknown' OR last_message_sender_name = 'Group member' OR last_message_sender_name LIKE '@%')"
       )
-      .run(contact.displayName, contact.protocolId);
+      .run(contact.displayName, accountId, accountId, accountId, contact.protocolId);
 
     const changes = Number(result.changes);
     if (changes > 0) {
@@ -597,6 +694,17 @@ export class SqliteStore implements MessageStore {
     }
   }
 
+  private currentAccountId(): string | undefined {
+    return this.activeAccountId;
+  }
+
+  private requireActiveAccountId(operation: string): string {
+    if (!this.activeAccountId) {
+      throw new Error(`Cannot ${operation} before an account is active`);
+    }
+    return this.activeAccountId;
+  }
+
   private migrate(): void {
     this.options.logger?.debug("running sqlite migrations");
     this.db.exec(`
@@ -609,7 +717,16 @@ export class SqliteStore implements MessageStore {
         updated_at INTEGER NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS accounts (
+        id TEXT PRIMARY KEY,
+        protocol_id TEXT,
+        display_name TEXT NOT NULL,
+        raw_json TEXT,
+        updated_at INTEGER NOT NULL
+      );
+
       CREATE TABLE IF NOT EXISTS contacts (
+        account_id TEXT,
         id TEXT PRIMARY KEY,
         protocol_id TEXT,
         kind TEXT NOT NULL,
@@ -622,10 +739,8 @@ export class SqliteStore implements MessageStore {
         updated_at INTEGER NOT NULL
       );
 
-      CREATE INDEX IF NOT EXISTS idx_contacts_display_name ON contacts(display_name);
-      CREATE INDEX IF NOT EXISTS idx_contacts_protocol_id ON contacts(protocol_id);
-
       CREATE TABLE IF NOT EXISTS conversations (
+        account_id TEXT,
         id TEXT PRIMARY KEY,
         protocol_id TEXT,
         kind TEXT NOT NULL,
@@ -638,11 +753,8 @@ export class SqliteStore implements MessageStore {
         updated_at INTEGER NOT NULL
       );
 
-      CREATE INDEX IF NOT EXISTS idx_conversations_protocol_id ON conversations(protocol_id);
-      CREATE INDEX IF NOT EXISTS idx_conversations_last_message_at ON conversations(last_message_at);
-      CREATE INDEX IF NOT EXISTS idx_conversations_unread_count ON conversations(unread_count);
-
       CREATE TABLE IF NOT EXISTS messages (
+        account_id TEXT,
         id TEXT PRIMARY KEY,
         conversation_id TEXT NOT NULL,
         protocol_message_id TEXT,
@@ -657,10 +769,8 @@ export class SqliteStore implements MessageStore {
         FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
       );
 
-      CREATE INDEX IF NOT EXISTS idx_messages_conversation_time ON messages(conversation_id, timestamp);
-      CREATE INDEX IF NOT EXISTS idx_messages_content ON messages(content);
-
       CREATE TABLE IF NOT EXISTS attachments (
+        account_id TEXT,
         id TEXT PRIMARY KEY,
         message_id TEXT NOT NULL,
         kind TEXT NOT NULL,
@@ -673,11 +783,23 @@ export class SqliteStore implements MessageStore {
         created_at INTEGER NOT NULL,
         FOREIGN KEY(message_id) REFERENCES messages(id) ON DELETE CASCADE
       );
-
-      CREATE INDEX IF NOT EXISTS idx_attachments_message_id ON attachments(message_id);
     `);
+    this.ensureColumn("contacts", "account_id", "TEXT");
+    this.ensureColumn("conversations", "account_id", "TEXT");
     this.ensureColumn("conversations", "last_message_sender_name", "TEXT");
     this.ensureColumn("conversations", "last_message_is_self", "INTEGER");
+    this.ensureColumn("messages", "account_id", "TEXT");
+    this.ensureColumn("attachments", "account_id", "TEXT");
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_contacts_account_display_name ON contacts(account_id, display_name);
+      CREATE INDEX IF NOT EXISTS idx_contacts_account_protocol_id ON contacts(account_id, protocol_id);
+      CREATE INDEX IF NOT EXISTS idx_conversations_account_protocol_id ON conversations(account_id, protocol_id);
+      CREATE INDEX IF NOT EXISTS idx_conversations_account_last_message_at ON conversations(account_id, last_message_at);
+      CREATE INDEX IF NOT EXISTS idx_conversations_account_unread_count ON conversations(account_id, unread_count);
+      CREATE INDEX IF NOT EXISTS idx_messages_account_conversation_time ON messages(account_id, conversation_id, timestamp);
+      CREATE INDEX IF NOT EXISTS idx_messages_account_content ON messages(account_id, content);
+      CREATE INDEX IF NOT EXISTS idx_attachments_account_message_id ON attachments(account_id, message_id);
+    `);
     this.options.logger?.debug("sqlite migrations complete");
   }
 
