@@ -151,6 +151,49 @@ describe("normalizeWechat4uMessage", () => {
     expect(richMessage?.conversation.title).toBe("Public Account");
   });
 
+  it("keeps the current user id stable when web wechat rotates self UserName", () => {
+    const first = normalizeWechat4uMessage(
+      {
+        MsgId: "self-1",
+        FromUserName: "@me-session-1",
+        ToUserName: "@friend",
+        MsgType: 1,
+        Content: "hello",
+        CreateTime: 1_700_000_000
+      },
+      {
+        ...bot,
+        user: {
+          UserName: "@me-session-1",
+          Uin: 123456,
+          NickName: "Me"
+        }
+      }
+    );
+    const second = normalizeWechat4uMessage(
+      {
+        MsgId: "self-2",
+        FromUserName: "@me-session-2",
+        ToUserName: "@friend",
+        MsgType: 1,
+        Content: "hello again",
+        CreateTime: 1_700_000_001
+      },
+      {
+        ...bot,
+        user: {
+          UserName: "@me-session-2",
+          Uin: 123456,
+          NickName: "Me"
+        }
+      }
+    );
+
+    expect(first?.sender.id).toBe(second?.sender.id);
+    expect(first?.sender.protocolId).toBe("@me-session-1");
+    expect(second?.sender.protocolId).toBe("@me-session-2");
+  });
+
   it("keeps unknown unsupported peer messages visible", () => {
     const message = normalizeWechat4uMessage(
       {

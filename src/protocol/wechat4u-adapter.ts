@@ -320,10 +320,8 @@ function normalizeContact(raw: RawContact, self?: RawContact): ContactInput {
   const remarkName = cleanText(raw.RemarkName);
   const nickName = cleanText(raw.NickName);
   const alias = cleanText(raw.Alias);
-  const id = contactId(
-    kind,
-    protocolId ? [protocolId] : [raw.Uin ? String(raw.Uin) : undefined, alias, remarkName, nickName, displayName]
-  );
+  const uin = raw.Uin ? String(raw.Uin) : undefined;
+  const id = contactId(kind, contactIdentityParts(kind, protocolId, uin, alias, remarkName, nickName, displayName));
 
   return {
     id,
@@ -336,6 +334,21 @@ function normalizeContact(raw: RawContact, self?: RawContact): ContactInput {
     isSelf: raw.isSelf === true || (!!self?.UserName && raw.UserName === self.UserName),
     raw
   };
+}
+
+function contactIdentityParts(
+  kind: ContactInput["kind"],
+  protocolId: string | undefined,
+  uin: string | undefined,
+  alias: string,
+  remarkName: string,
+  nickName: string,
+  displayName: string
+): Array<string | undefined> {
+  if (kind === "self" && uin) {
+    return [uin];
+  }
+  return protocolId ? [protocolId] : [uin, alias, remarkName, nickName, displayName];
 }
 
 export function normalizeWechat4uMessage(rawInput: unknown, botInput: unknown): IncomingProtocolMessage | undefined {
