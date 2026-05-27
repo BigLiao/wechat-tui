@@ -8,9 +8,12 @@ import { Wechat4uAdapter } from "./protocol/wechat4u-adapter.js";
 import { WeChatRuntime } from "./runtime.js";
 import { SqliteStore } from "./store/sqlite-store.js";
 import { WorkbenchTerminalRenderer } from "./ui/workbench-renderer.js";
+import { checkForPackageUpdate } from "./update-check.js";
+import { readPackageInfo } from "./version.js";
 
 async function main(): Promise<void> {
   const config = parseCliConfig(process.argv.slice(2));
+  const packageInfo = readPackageInfo();
 
   if (config.help) {
     process.stdout.write(`${formatHelp()}\n`);
@@ -18,7 +21,7 @@ async function main(): Promise<void> {
   }
 
   if (config.version) {
-    process.stdout.write("0.1.0\n");
+    process.stdout.write(`${packageInfo.version}\n`);
     return;
   }
 
@@ -30,7 +33,16 @@ async function main(): Promise<void> {
   const store = new SqliteStore(config.dbPath, { logger });
   const protocol = config.mock ? new MockProtocol() : new Wechat4uAdapter({ logger });
   const renderer = new WorkbenchTerminalRenderer();
-  const runtime = new WeChatRuntime(protocol, store, renderer, { logger, debugLogPath: logPath });
+  const runtime = new WeChatRuntime(protocol, store, renderer, {
+    logger,
+    debugLogPath: logPath,
+    updateCheck: () =>
+      checkForPackageUpdate({
+        packageName: packageInfo.name,
+        currentVersion: packageInfo.version,
+        logger
+      })
+  });
 
   let closed = false;
   const shutdown = (code: number) => {

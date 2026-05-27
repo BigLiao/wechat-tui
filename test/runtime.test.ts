@@ -194,6 +194,27 @@ describe("WeChatRuntime", () => {
     store.close();
   });
 
+  it("renders an update notification when a newer package version is available", async () => {
+    const store = new SqliteStore(tempDb());
+    const protocol = new MockProtocol();
+    const renderer = new FakeRenderer();
+    const runtime = new WeChatRuntime(protocol, store, renderer, {
+      initialHistoryLimit: 10,
+      updateCheck: async () => ({
+        packageName: "wechat-tui",
+        currentVersion: "0.1.1",
+        latestVersion: "0.1.2",
+        installCommand: "npm install -g wechat-tui@latest"
+      })
+    });
+
+    await runtime.start();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(renderer.latest.updateInfo?.latestVersion).toBe("0.1.2");
+    store.close();
+  });
+
   it("uses redraw state for chats, keyboard navigation, chat input, unread status, and search", async () => {
     const store = new SqliteStore(tempDb());
     const protocol = new MockProtocol();

@@ -56,6 +56,24 @@ describe("WorkbenchTerminalRenderer", () => {
     expect(output).toContain("select");
   });
 
+  it("renders update notifications at the top of the screen", () => {
+    const output = renderState(
+      baseState({
+        updateInfo: {
+          packageName: "wechat-tui",
+          currentVersion: "0.1.1",
+          latestVersion: "0.1.2",
+          installCommand: "npm install -g wechat-tui@latest"
+        }
+      })
+    );
+
+    const plain = stripAnsi(output);
+    expect(plain).toContain("Update available");
+    expect(plain).toContain("0.1.1 -> 0.1.2");
+    expect(plain).toContain("npm install -g wechat-tui@latest");
+  });
+
   it("truncates conversation previews to twenty-four columns", () => {
     const output = renderState(
       baseState({

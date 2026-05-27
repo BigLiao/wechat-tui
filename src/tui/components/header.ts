@@ -32,14 +32,26 @@ export class Header {
 
     const topLine = `${theme.border(`${BOX.tl}${BOX.h}`)} ${title} ${fill} ${status}${accountPart}${theme.border(`${BOX.h}${BOX.tr}`)}`;
 
+    const updateLine = state.updateInfo
+      ? fit(
+          `  ${theme.warning("Update available")} ${theme.dim(state.updateInfo.currentVersion)} ${theme.dim("->")} ` +
+            `${theme.accent(state.updateInfo.latestVersion)} ${theme.dim(state.updateInfo.installCommand)}`,
+          width
+        )
+      : undefined;
+
     // Subtitle line (only if non-empty)
     const subtitleLine = subtitle
       ? `  ${theme.bold(subtitle)}`
       : "";
 
-    if (subtitle) {
-      return [fit(topLine, width), fit(subtitleLine, width)];
+    const lines = [fit(topLine, width)];
+    if (updateLine) {
+      lines.push(updateLine);
     }
-    return [fit(topLine, width)];
+    if (subtitle) {
+      lines.push(fit(subtitleLine, width));
+    }
+    return lines;
   }
 }

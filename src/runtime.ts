@@ -25,6 +25,7 @@ import type {
   RenderState,
   UiEvent,
   UiKey,
+  UpdateInfo,
   UserProfile,
   WeChatProtocol,
   WorkbenchRenderer
@@ -37,6 +38,7 @@ export interface RuntimeOptions {
   searchLimit?: number;
   logger?: Logger;
   debugLogPath?: string;
+  updateCheck?: () => Promise<UpdateInfo | undefined>;
 }
 
 export class WeChatRuntime extends EventEmitter {
@@ -53,6 +55,7 @@ export class WeChatRuntime extends EventEmitter {
   private conversationFocus: "list" | "input" = "list";
   private statusMessage?: string;
   private errorMessage?: string;
+  private updateInfo?: UpdateInfo;
   private accountName?: string;
   private activeAccountId?: string;
   private qr?: RenderState["qr"];
@@ -82,6 +85,7 @@ export class WeChatRuntime extends EventEmitter {
       }
     );
     this.statusMessage = "Starting protocol and loading local cache...";
+    this.startUpdateCheck();
     this.render();
     await this.protocol.start(this.store.getSessionData());
     this.options.logger?.info("runtime start completed");
@@ -853,6 +857,7 @@ export class WeChatRuntime extends EventEmitter {
       statusMessage: this.statusMessage,
       errorMessage: this.errorMessage,
       debugLogPath: this.options.debugLogPath,
+      updateInfo: this.updateInfo,
       conversations,
       conversationQuery: this.conversationQuery,
       selectedConversationIndex: this.selectedConversationIndex,
@@ -875,6 +880,32 @@ export class WeChatRuntime extends EventEmitter {
       return undefined;
     }
     return this.store.findConversationById(this.activeConversationId);
+  }
+
+  private startUpdateCheck(): void {
+    if (!this.options.updateCheck) {
+      return;
+    }
+    void this.options.updateCheck().then(
+      (updateInfo) => {
+        if (this.exiting || !updateInfo) {
+          return;
+        }
+        this.updateInfo = updateInfo;
+        this.options.logger?.info(
+          {
+            packageName: updateInfo.packageName,
+            currentVersion: updateInfo.currentVersion,
+            latestVersion: updateInfo.latestVersion
+          },
+          "new package version available"
+        );
+        this.render();
+      },
+      (error: unknown) => {
+        this.options.logger?.debug({ err: error }, "update check failed");
+      }
+    );
   }
 
   private conversationFromStoredContact(contact: ContactRecord): ConversationInput {

@@ -124,6 +124,13 @@ export interface IncomingProtocolMessage {
   raw?: unknown;
 }
 
+export interface UpdateInfo {
+  packageName: string;
+  currentVersion: string;
+  latestVersion: string;
+  installCommand: string;
+}
+
 export interface WeChatProtocol extends EventEmitter {
   start(sessionData?: unknown): Promise<void>;
   reconnect(): Promise<void>;
@@ -169,6 +176,7 @@ export interface RenderState {
   statusMessage?: string;
   errorMessage?: string;
   debugLogPath?: string;
+  updateInfo?: UpdateInfo;
   conversations: ConversationRecord[];
   conversationQuery: string;
   selectedConversationIndex: number;
