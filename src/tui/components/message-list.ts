@@ -69,6 +69,9 @@ function messageDisplayContent(message: MessageRecord): string {
   switch (message.type) {
     case "text":
     case "notice":
+    case "link":
+    case "file":
+    case "mini-program":
       return message.content || placeholderForMessage(message);
     default:
       return placeholderForMessage(message);
@@ -77,6 +80,8 @@ function messageDisplayContent(message: MessageRecord): string {
 
 function placeholderForMessage(message: MessageRecord): string {
   switch (message.type) {
+    case "link":
+      return theme.dim("[link]");
     case "image":
       return theme.dim("[image]");
     case "voice":

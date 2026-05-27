@@ -15,7 +15,17 @@ export type ConnectionState =
 export type AppView = "login" | "chats" | "chat" | "search";
 export type ConversationFocus = "list" | "input";
 export type ContactKind = "private" | "group" | "public" | "special" | "self";
-export type MessageKind = "text" | "notice" | "image" | "voice" | "video" | "file" | "mini-program" | "sticker" | "unsupported";
+export type MessageKind =
+  | "text"
+  | "notice"
+  | "link"
+  | "image"
+  | "voice"
+  | "video"
+  | "file"
+  | "mini-program"
+  | "sticker"
+  | "unsupported";
 
 export interface ContactRecord {
   id: string;

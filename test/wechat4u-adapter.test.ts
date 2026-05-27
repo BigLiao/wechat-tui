@@ -40,9 +40,13 @@ const bot = {
   CONF: {
     MSGTYPE_TEXT: 1,
     MSGTYPE_IMAGE: 3,
+    MSGTYPE_APP: 49,
     MSGTYPE_STATUSNOTIFY: 51,
     MSGTYPE_SYSNOTICE: 9999,
-    MSGTYPE_SYS: 10000
+    MSGTYPE_SYS: 10000,
+    APPMSGTYPE_URL: 5,
+    APPMSGTYPE_ATTACH: 6,
+    APPMSGTYPE_READER_TYPE: 100001
   }
 };
 
@@ -162,6 +166,109 @@ describe("normalizeWechat4uMessage", () => {
 
     expect(message?.content).toBe("[unsupported message]");
     expect(message?.type).toBe("unsupported");
+  });
+
+  it("parses shared link app messages", () => {
+    const message = normalizeWechat4uMessage(
+      {
+        MsgId: "link-1",
+        FromUserName: "@friend",
+        ToUserName: "@me",
+        MsgType: 49,
+        AppMsgType: 5,
+        Content:
+          "<msg><appmsg><title>Example title</title><des>Example description</des><type>5</type><url>https://example.com/?a=1&amp;b=2</url></appmsg></msg>",
+        CreateTime: 1_700_000_000
+      },
+      bot
+    );
+
+    expect(message?.type).toBe("link");
+    expect(message?.content).toContain("[link] Example title");
+    expect(message?.content).toContain("Example description");
+    expect(message?.content).toContain("https://example.com/?a=1&b=2");
+  });
+
+  it("parses mini program app messages", () => {
+    const message = normalizeWechat4uMessage(
+      {
+        MsgId: "mini-1",
+        FromUserName: "@friend",
+        ToUserName: "@me",
+        MsgType: 49,
+        AppMsgType: 33,
+        Content:
+          "<msg><appmsg><title>Mini title</title><des>Mini description</des><type>33</type><weappinfo><username>gh_demo</username><appid>wx123</appid><pagepath>pages/index/index.html?foo=bar</pagepath></weappinfo></appmsg></msg>",
+        CreateTime: 1_700_000_000
+      },
+      bot
+    );
+
+    expect(message?.type).toBe("mini-program");
+    expect(message?.content).toContain("[mini-program] Mini title");
+    expect(message?.content).toContain("Mini description");
+    expect(message?.content).toContain("pages/index/index.html?foo=bar");
+  });
+
+  it("parses group app messages after removing the sender prefix", () => {
+    const message = normalizeWechat4uMessage(
+      {
+        MsgId: "group-link-1",
+        FromUserName: "@@project",
+        ToUserName: "@me",
+        MsgType: 49,
+        AppMsgType: 5,
+        Content:
+          "Alice:\n<msg><appmsg><title>Group link</title><des>Shared in group</des><type>5</type><url>https://example.com/group</url></appmsg></msg>",
+        OriginalContent:
+          "@alice:<br/>&lt;msg&gt;&lt;appmsg&gt;&lt;title&gt;Group link&lt;/title&gt;&lt;des&gt;Shared in group&lt;/des&gt;&lt;type&gt;5&lt;/type&gt;&lt;url&gt;https://example.com/group&lt;/url&gt;&lt;/appmsg&gt;&lt;/msg&gt;",
+        CreateTime: 1_700_000_000
+      },
+      bot
+    );
+
+    expect(message?.type).toBe("link");
+    expect(message?.sender.displayName).toBe("Alice");
+    expect(message?.content).toContain("[link] Group link");
+  });
+
+  it("keeps location messages readable when details are stored in XML attributes", () => {
+    const message = normalizeWechat4uMessage(
+      {
+        MsgId: "location-1",
+        FromUserName: "@friend",
+        ToUserName: "@me",
+        MsgType: 48,
+        Content:
+          '<msg><location x="22.543096" y="114.057865" scale="16" label="Shenzhen" poiname="Civic Center" /></msg>',
+        CreateTime: 1_700_000_000
+      },
+      bot
+    );
+
+    expect(message?.type).toBe("notice");
+    expect(message?.content).toBe("[location] Civic Center");
+  });
+
+  it("keeps shared contact cards readable", () => {
+    const message = normalizeWechat4uMessage(
+      {
+        MsgId: "card-1",
+        FromUserName: "@friend",
+        ToUserName: "@me",
+        MsgType: 42,
+        Content: "",
+        RecommendInfo: {
+          UserName: "@card",
+          NickName: "Card Friend"
+        },
+        CreateTime: 1_700_000_000
+      },
+      bot
+    );
+
+    expect(message?.type).toBe("notice");
+    expect(message?.content).toBe("[contact-card] Card Friend");
   });
 
   it("uses group member metadata even when getDisplayName returns an empty string", () => {

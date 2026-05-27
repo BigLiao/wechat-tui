@@ -12,7 +12,7 @@ import type {
   WeChatProtocol
 } from "../types.js";
 import { contactId, conversationFromContact, localMessageId } from "../util/ids.js";
-import { cleanText } from "../util/text.js";
+import { cleanText, decodeHtml } from "../util/text.js";
 import { preview, summarizeContacts, summarizeIncomingMessage, summarizeRawWechatMessage } from "../logging.js";
 
 const require = createRequire(import.meta.url);
@@ -61,9 +61,14 @@ interface RawMessage {
   AppMsgType?: number;
   FileName?: string;
   FileNameTitle?: string;
+  FileSize?: number | string;
+  Url?: string;
   CreateTime?: number;
   StatusNotifyCode?: number;
   StatusNotifyUserName?: string;
+  SubMsgType?: number;
+  RecommendInfo?: unknown;
+  AppInfo?: unknown;
   isSendBySelf?: boolean;
   getPeerUserName?: () => string;
 }
@@ -333,10 +338,7 @@ export function normalizeWechat4uMessage(rawInput: unknown, botInput: unknown): 
   const sender = isSelf
     ? normalizeContact(bot.user ?? { UserName: selfProtocolId, NickName: "You", isSelf: true }, bot.user)
     : normalizeSender(raw, bot, conversationContact, parsedContent);
-  const content =
-    type === "text" || type === "notice"
-      ? parsedContent.content || placeholderForMessageKind(type, raw)
-      : placeholderForMessageKind(type, raw);
+  const content = messageContentForKind(type, raw, conversationContact, parsedContent, isSelf);
 
   return {
     id: protocolMessageId ? `wechat:${protocolMessageId}` : localMessageId([conversation.id, sender.id, content, String(timestamp)]),
@@ -455,6 +457,17 @@ function detectMessageKind(raw: RawMessage, bot: RawWechatBot): MessageKind {
         MSGTYPE_MICROVIDEO?: number;
         MSGTYPE_EMOTICON?: number;
         MSGTYPE_APP?: number;
+        MSGTYPE_LOCATION?: number;
+        MSGTYPE_SHARECARD?: number;
+        MSGTYPE_RECALLED?: number;
+        APPMSGTYPE_IMG?: number;
+        APPMSGTYPE_AUDIO?: number;
+        APPMSGTYPE_VIDEO?: number;
+        APPMSGTYPE_URL?: number;
+        APPMSGTYPE_ATTACH?: number;
+        APPMSGTYPE_EMOJI?: number;
+        APPMSGTYPE_EMOTION?: number;
+        APPMSGTYPE_READER_TYPE?: number;
       }
     | undefined;
   const messageType = Number(raw.MsgType);
@@ -473,10 +486,31 @@ function detectMessageKind(raw: RawMessage, bot: RawWechatBot): MessageKind {
   if (messageType === Number(conf?.MSGTYPE_EMOTICON ?? 47)) {
     return "sticker";
   }
+  if (messageType === Number(conf?.MSGTYPE_LOCATION ?? 48)) {
+    return "notice";
+  }
+  if (messageType === Number(conf?.MSGTYPE_SHARECARD ?? 42)) {
+    return "notice";
+  }
+  if (messageType === Number(conf?.MSGTYPE_RECALLED ?? 10002)) {
+    return "notice";
+  }
   if (messageType === Number(conf?.MSGTYPE_APP ?? 49)) {
     const appType = Number(raw.AppMsgType);
-    if (appType === 6 || appType === 74) {
+    if (appType === Number(conf?.APPMSGTYPE_URL ?? 5) || appType === Number(conf?.APPMSGTYPE_READER_TYPE ?? 100001)) {
+      return "link";
+    }
+    if (appType === Number(conf?.APPMSGTYPE_ATTACH ?? 6) || appType === 74) {
       return "file";
+    }
+    if (appType === Number(conf?.APPMSGTYPE_IMG ?? 2)) {
+      return "image";
+    }
+    if (appType === Number(conf?.APPMSGTYPE_VIDEO ?? 4)) {
+      return "video";
+    }
+    if (appType === Number(conf?.APPMSGTYPE_EMOJI ?? 8) || appType === Number(conf?.APPMSGTYPE_EMOTION ?? 15)) {
+      return "sticker";
     }
     if (appType === 33 || appType === 36) {
       return "mini-program";
@@ -486,8 +520,209 @@ function detectMessageKind(raw: RawMessage, bot: RawWechatBot): MessageKind {
   return raw.Content ? "notice" : "unsupported";
 }
 
+function messageContentForKind(
+  type: MessageKind,
+  raw: RawMessage,
+  conversationContact: ContactInput,
+  parsedContent: ParsedMessageContent,
+  isSelf: boolean
+): string {
+  switch (type) {
+    case "text":
+      return parsedContent.content || placeholderForMessageKind(type, raw);
+    case "notice":
+      return parsedContent.content || formatNoticeMessage(raw, conversationContact, isSelf) || placeholderForMessageKind(type, raw);
+    case "link":
+    case "mini-program":
+    case "file":
+      return formatAppMessage(type, raw, conversationContact, isSelf) || placeholderForMessageKind(type, raw);
+    default:
+      return placeholderForMessageKind(type, raw);
+  }
+}
+
+interface ParsedAppMessage {
+  title?: string;
+  description?: string;
+  url?: string;
+  pagePath?: string;
+  username?: string;
+  appId?: string;
+  fileExt?: string;
+  totalLength?: string;
+}
+
+function formatAppMessage(
+  type: MessageKind,
+  raw: RawMessage,
+  conversationContact: ContactInput,
+  isSelf: boolean
+): string {
+  const app = parseAppMessage(raw, conversationContact, isSelf);
+  if (!app) {
+    return "";
+  }
+
+  switch (type) {
+    case "link": {
+      const lines = [`[link] ${app.title || app.url || "Untitled"}`];
+      if (app.description) {
+        lines.push(app.description);
+      }
+      if (app.url && app.url !== app.title) {
+        lines.push(app.url);
+      }
+      return lines.join("\n");
+    }
+    case "mini-program": {
+      const lines = [`[mini-program] ${app.title || app.description || app.pagePath || "Untitled"}`];
+      if (app.description && app.description !== app.title) {
+        lines.push(app.description);
+      }
+      if (app.pagePath) {
+        lines.push(app.pagePath);
+      }
+      return lines.join("\n");
+    }
+    case "file": {
+      const fileName = cleanText(raw.FileName) || cleanText(raw.FileNameTitle) || app.title;
+      const suffix = [app.fileExt, formatFileSize(app.totalLength ?? raw.FileSize)].filter(Boolean).join(", ");
+      return fileName ? `[file] ${fileName}${suffix ? ` (${suffix})` : ""}` : "";
+    }
+    default:
+      return "";
+  }
+}
+
+function formatNoticeMessage(raw: RawMessage, conversationContact: ContactInput, isSelf: boolean): string {
+  const messageType = Number(raw.MsgType);
+  if (messageType === 48) {
+    return formatLocationMessage(raw, conversationContact, isSelf);
+  }
+  if (messageType === 42) {
+    return formatContactCardMessage(raw);
+  }
+  if (messageType === 10002) {
+    return "[recalled]";
+  }
+  if (messageType === 49) {
+    const app = parseAppMessage(raw, conversationContact, isSelf);
+    if (!app) {
+      return "";
+    }
+    return [`[app] ${app.title || app.description || "Untitled"}`, app.description, app.url].filter(Boolean).join("\n");
+  }
+  return "";
+}
+
+function formatLocationMessage(raw: RawMessage, conversationContact: ContactInput, isSelf: boolean): string {
+  const xml = appMessageXml(raw, conversationContact, isSelf);
+  const label = cleanXmlValue(attributeValue(xml, "label"));
+  const pointName = cleanXmlValue(attributeValue(xml, "poiname"));
+  const x = cleanXmlValue(attributeValue(xml, "x"));
+  const y = cleanXmlValue(attributeValue(xml, "y"));
+  const coords = x && y ? `${x}, ${y}` : undefined;
+  return ["[location]", pointName || label || coords].filter(Boolean).join(" ");
+}
+
+function formatContactCardMessage(raw: RawMessage): string {
+  const info = raw.RecommendInfo;
+  const nickname = objectString(info, "NickName") || objectString(info, "DisplayName") || objectString(info, "UserName");
+  return nickname ? `[contact-card] ${nickname}` : "[contact-card]";
+}
+
+function parseAppMessage(raw: RawMessage, conversationContact: ContactInput, isSelf: boolean): ParsedAppMessage | undefined {
+  const xml = appMessageXml(raw, conversationContact, isSelf);
+  if (!xml || !xml.includes("<appmsg")) {
+    return undefined;
+  }
+
+  return {
+    title: cleanXmlValue(tagValue(xml, "title")),
+    description: cleanXmlValue(tagValue(xml, "des")),
+    url: cleanXmlValue(tagValue(xml, "url") || cleanRawString(raw.Url)),
+    pagePath: cleanXmlValue(tagValue(xml, "pagepath")),
+    username: cleanXmlValue(tagValue(xml, "username")),
+    appId: cleanXmlValue(tagValue(xml, "appid")),
+    fileExt: cleanXmlValue(tagValue(xml, "fileext")),
+    totalLength: cleanXmlValue(tagValue(xml, "totallen"))
+  };
+}
+
+function appMessageXml(raw: RawMessage, conversationContact: ContactInput, isSelf: boolean): string {
+  const content = normalizeRawContent(raw.Content);
+  if (conversationContact.kind !== "group" || isSelf) {
+    return content;
+  }
+
+  const displayPrefixMatch = content.match(/^.+?:\n([\s\S]*)$/);
+  if (displayPrefixMatch) {
+    return displayPrefixMatch[1]?.trim() ?? "";
+  }
+
+  const original = normalizeRawContent(raw.OriginalContent);
+  const protocolPrefixMatch = original.match(/^@[^:\n]+:\n?([\s\S]*)$/);
+  return protocolPrefixMatch?.[1]?.trim() ?? content;
+}
+
+function normalizeRawContent(input: unknown): string {
+  if (input === undefined || input === null) {
+    return "";
+  }
+  return decodeHtml(String(input)).replace(/\r\n/g, "\n").trim();
+}
+
+function tagValue(xml: string, tag: string): string | undefined {
+  const match = xml.match(new RegExp(`<${tag}\\b[^>]*>([\\s\\S]*?)<\\/${tag}>`, "i"));
+  return match?.[1];
+}
+
+function attributeValue(xml: string, attribute: string): string | undefined {
+  const match = xml.match(new RegExp(`\\b${attribute}\\s*=\\s*(['"])([\\s\\S]*?)\\1`, "i"));
+  return match?.[2];
+}
+
+function cleanXmlValue(input: unknown): string | undefined {
+  const value = cleanText(input);
+  return value || undefined;
+}
+
+function cleanRawString(input: unknown): string | undefined {
+  if (typeof input !== "string") {
+    return undefined;
+  }
+  const value = decodeHtml(input).trim();
+  return value || undefined;
+}
+
+function formatFileSize(value: unknown): string | undefined {
+  const size = typeof value === "number" ? value : typeof value === "string" ? Number(value) : Number.NaN;
+  if (!Number.isFinite(size) || size <= 0) {
+    return undefined;
+  }
+  if (size < 1024) {
+    return `${size} B`;
+  }
+  if (size < 1024 * 1024) {
+    return `${(size / 1024).toFixed(1)} KB`;
+  }
+  return `${(size / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function objectString(input: unknown, key: string): string | undefined {
+  if (!input || typeof input !== "object") {
+    return undefined;
+  }
+  const value = (input as Record<string, unknown>)[key];
+  return typeof value === "string" && value.trim() ? cleanText(value) : undefined;
+}
+
 function placeholderForMessageKind(type: MessageKind, raw: RawMessage): string {
   switch (type) {
+    case "notice":
+      return "[notice]";
+    case "link":
+      return "[link]";
     case "image":
       return "[image]";
     case "voice":
