@@ -3,6 +3,10 @@
   "version": "0.1.0",
   "description": "A terminal client for WeChat.",
   "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/BigLiao/wechat-tui.git"
+  },
   "files": [
     "dist",
     "README.md"
