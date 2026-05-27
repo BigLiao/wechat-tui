@@ -1,7 +1,7 @@
 import { SelectList } from "@earendil-works/pi-tui";
 import type { Component, SelectItem, SelectListTheme, TUI } from "@earendil-works/pi-tui";
 import type { RenderState, UiEvent } from "../types.js";
-import { theme } from "./theme.js";
+import { fit, theme } from "./theme.js";
 import { LoginScreen } from "./login-screen.js";
 import { ConversationScreen } from "./conversation-screen.js";
 import { ChatScreen } from "./chat-screen.js";
@@ -80,7 +80,7 @@ export class WechatApp implements Component {
             ? `${c.lastMessageIsSelf ? "You" : c.lastMessageSenderName}: ${c.lastMessagePreview}`
             : c.lastMessageIsSelf ? `You: ${c.lastMessagePreview}` : c.lastMessagePreview)
         : undefined;
-      return { value: c.id, label, description: preview };
+      return { value: c.id, label, description: preview ? fit(preview.replace(/\s+/g, " "), 12) : undefined };
     });
     items.push({ value: SEARCH_ITEM_VALUE, label: "Search contacts", description: "/contacts" });
 

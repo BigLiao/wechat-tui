@@ -3,6 +3,10 @@ import { renderState } from "../src/ui/workbench-renderer.js";
 import { MessageList } from "../src/tui/components/message-list.js";
 import type { RenderState } from "../src/types.js";
 
+function stripAnsi(input: string): string {
+  return input.replace(/\x1b\[[0-9;]*m/g, "");
+}
+
 function baseState(overrides: Partial<RenderState>): RenderState {
   return {
     view: "chats",
@@ -48,8 +52,30 @@ describe("WorkbenchTerminalRenderer", () => {
 
     expect(output).toContain("Recent Chats");
     expect(output).toContain("Project A");
-    expect(output).toContain("Alice: campaignId changed");
+    expect(stripAnsi(output)).toContain("Alice: camp…");
     expect(output).toContain("select");
+  });
+
+  it("truncates conversation previews to twelve columns", () => {
+    const output = renderState(
+      baseState({
+        conversations: [
+          {
+            id: "conversation:boss",
+            protocolId: "@boss",
+            kind: "private",
+            title: "Boss",
+            unreadCount: 0,
+            lastMessagePreview: "[link] 这是一个很长的链接标题",
+            lastMessageAt: 1_700_000_000_000,
+            updatedAt: 1_700_000_000_000
+          }
+        ]
+      })
+    );
+
+    expect(stripAnsi(output)).toContain("[link] 这是…");
+    expect(stripAnsi(output)).not.toContain("很长的链接标题");
   });
 
   it("renders only the active chat body and summarizes other unread conversations", () => {
