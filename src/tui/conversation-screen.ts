@@ -1,4 +1,4 @@
-import type { SelectList } from "@earendil-works/pi-tui";
+import type { Component, SelectList } from "@earendil-works/pi-tui";
 import { theme, fit, fillLines, border } from "./theme.js";
 import { Header } from "./components/header.js";
 import { StatusBar, HINTS_CONVERSATION } from "./components/status-bar.js";
@@ -8,7 +8,7 @@ export class ConversationScreen {
   private readonly header = new Header();
   private readonly statusBar = new StatusBar();
 
-  render(state: RenderState, width: number, rows: number, selectList: SelectList): string[] {
+  render(state: RenderState, width: number, rows: number, selectList: SelectList, overlay?: Component): string[] {
     // Fixed top: header
     const headerLines = this.header.render(state, "Recent Chats", width);
 
@@ -25,13 +25,16 @@ export class ConversationScreen {
     const unreadText = state.totalUnreadCount > 0 ? `${state.totalUnreadCount} unread` : "";
     const bottomLines = [this.statusBar.render(state, HINTS_CONVERSATION, width, unreadText)];
 
+    // Command/confirm panel (rendered above the list when visible)
+    const commandLines = overlay ? overlay.render(width) : [];
+
     // Content: SelectList render, bottom-aligned in fixed-height region
     const rawContentLines = selectList.render(width);
-    const listAreaHeight = Math.max(1, rows - headerLines.length - statusLines.length - bottomLines.length);
+    const listAreaHeight = Math.max(1, rows - headerLines.length - statusLines.length - bottomLines.length - commandLines.length);
     const contentLines =
       rawContentLines.length > listAreaHeight ? rawContentLines.slice(rawContentLines.length - listAreaHeight) : rawContentLines;
     const fill = fillLines(listAreaHeight, contentLines.length, 0, width);
 
-    return [...headerLines, ...statusLines, ...fill, ...contentLines, ...bottomLines];
+    return [...headerLines, ...statusLines, ...fill, ...contentLines, ...commandLines, ...bottomLines];
   }
 }

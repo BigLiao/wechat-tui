@@ -39,6 +39,18 @@ export class WorkbenchTerminalRenderer implements WorkbenchRenderer {
       if (!key) {
         return undefined;
       }
+
+      // Show command panel when `/` is pressed on chats view
+      if (this.app?.isChatsView() && !this.app.isCommandPanelVisible() && key.sequence === "/") {
+        this.app.showCommandPanel();
+        return { consume: true };
+      }
+
+      // When command panel is visible, let SelectList handle all input
+      if (this.app?.isChatsView() && this.app.isCommandPanelVisible()) {
+        return undefined;
+      }
+
       // Let focused components (Editor, SelectList) handle input directly
       if (this.app?.isChatView() && !isGlobalChatKey(key)) {
         return undefined;
@@ -142,7 +154,7 @@ function isGlobalChatKey(key: UiKey): boolean {
 }
 
 function isGlobalChatsKey(key: UiKey): boolean {
-  return key.ctrl === true || key.name === "escape" || key.sequence === "q" || key.sequence === "Q";
+  return key.ctrl === true || key.sequence === "q" || key.sequence === "Q";
 }
 
 class SnapshotTerminal implements Terminal {

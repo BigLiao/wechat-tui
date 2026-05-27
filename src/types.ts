@@ -211,6 +211,7 @@ export interface MessageStore {
   getSessionData(): unknown | undefined;
   setSessionData(data: unknown): void;
   clearSessionData(): void;
+  clearData(): void;
   upsertContact(contact: ContactInput): ContactRecord;
   upsertContacts(contacts: ContactInput[]): ContactRecord[];
   listContacts(kind?: ContactKind, limit?: number): ContactRecord[];

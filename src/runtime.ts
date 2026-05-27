@@ -1,8 +1,7 @@
 import { EventEmitter } from "node:events";
-import { existsSync } from "node:fs";
-import { resolve, basename, extname } from "node:path";
-import { homedir, tmpdir, platform } from "node:os";
-import { execSync } from "node:child_process";
+import { existsSync, rmSync, readdirSync } from "node:fs";
+import { resolve, basename, extname, join } from "node:path";
+import { homedir } from "node:os";
 import type { Logger } from "pino";
 import {
   preview,
@@ -330,11 +329,21 @@ export class WeChatRuntime extends EventEmitter {
       this.enterContactSearch("chats");
       return;
     }
-    if (isQuitKey(key)) {
+    if (key.name === "command-clear") {
+      this.clearAppData();
+      return;
+    }
+    if (key.name === "command-logout") {
+      await this.protocol.logout();
+      this.store.clearSessionData();
       this.requestExit();
       return;
     }
-    if (isEscapeKey(key)) {
+    if (key.name === "command-quit") {
+      this.requestExit();
+      return;
+    }
+    if (isQuitKey(key)) {
       this.requestExit();
       return;
     }
@@ -430,29 +439,6 @@ export class WeChatRuntime extends EventEmitter {
       case "/contacts":
         this.enterContactSearch(sourceView);
         return;
-      case "/chats":
-        this.view = "chats";
-        this.previousView = sourceView;
-        this.chatInput = "";
-        this.conversationFocus = "list";
-        this.statusMessage = "recent chats";
-        return;
-      case "/status":
-        this.statusMessage = `connection: ${this.connectionState}${this.accountName ? `, account: ${this.accountName}` : ""}`;
-        return;
-      case "/refresh": {
-        const contacts = await this.protocol.getContacts();
-        this.store.upsertContacts(contacts.map((contact) => this.scopeContact(contact)));
-        this.persistSessionData();
-        this.statusMessage = `refreshed ${contacts.length} contacts`;
-        return;
-      }
-      case "/load":
-        this.statusMessage = "local history is loaded from the message store";
-        return;
-      case "/messages":
-        this.errorMessage = "/messages local message search is not implemented yet";
-        return;
       case "/send": {
         const filePath = command.slice(name.length).trim();
         if (filePath) {
@@ -462,15 +448,11 @@ export class WeChatRuntime extends EventEmitter {
         }
         return;
       }
-      case "/paste": {
-        const tempPath = this.extractClipboardImage();
-        if (tempPath) {
-          await this.sendFileToActiveConversation(tempPath);
-        } else {
-          this.errorMessage = "No image found in clipboard";
-        }
+      case "/logout":
+        await this.protocol.logout();
+        this.store.clearSessionData();
+        this.requestExit();
         return;
-      }
       case "/quit":
         this.requestExit();
         return;
@@ -710,39 +692,6 @@ export class WeChatRuntime extends EventEmitter {
     }
   }
 
-  private extractClipboardImage(): string | undefined {
-    const os = platform();
-    const tempFile = resolve(tmpdir(), `wechat-tui-paste-${Date.now()}.png`);
-
-    try {
-      if (os === "darwin") {
-        // macOS: use osascript to write clipboard image to a temp file
-        execSync(
-          `osascript -e 'set imageData to the clipboard as «class PNGf»' -e 'set filePath to POSIX file "${tempFile}"' -e 'set fileRef to open for access filePath with write permission' -e 'write imageData to fileRef' -e 'close access fileRef'`,
-          { stdio: "pipe", timeout: 5000 }
-        );
-      } else if (os === "linux") {
-        // Linux: use xclip to write clipboard image
-        execSync(`xclip -selection clipboard -t image/png -o > "${tempFile}"`, {
-          stdio: "pipe",
-          shell: "/bin/sh",
-          timeout: 5000
-        });
-      } else {
-        this.options.logger?.warn({ platform: os }, "clipboard image paste not supported on this platform");
-        return undefined;
-      }
-
-      if (existsSync(tempFile)) {
-        return tempFile;
-      }
-      return undefined;
-    } catch {
-      this.options.logger?.debug({ platform: os }, "no image in clipboard or clipboard tool not available");
-      return undefined;
-    }
-  }
-
   private handleIncomingMessage(incoming: IncomingProtocolMessage): void {
     const scopedIncoming = this.scopeIncomingMessage(incoming);
     this.store.upsertContact(this.contactFromConversationInput(scopedIncoming.conversation));
@@ -967,6 +916,31 @@ export class WeChatRuntime extends EventEmitter {
     if (sessionData !== undefined) {
       this.options.logger?.trace("persisting protocol session data");
       this.store.setSessionData(sessionData);
+    }
+  }
+
+  private clearAppData(): void {
+    this.options.logger?.info("clearing app data (messages, contacts, logs)");
+    this.store.clearData();
+    this.clearLogFiles();
+    this.statusMessage = "data cleared";
+    this.render();
+  }
+
+  private clearLogFiles(): void {
+    const logDir = join(homedir(), ".wechat-tui", "logs");
+    try {
+      if (!existsSync(logDir)) return;
+      const files = readdirSync(logDir);
+      const currentLogPath = this.options.debugLogPath;
+      for (const file of files) {
+        const filePath = join(logDir, file);
+        // Skip the current log file (still in use)
+        if (currentLogPath && filePath === currentLogPath) continue;
+        try { rmSync(filePath); } catch { /* ignore */ }
+      }
+    } catch {
+      this.options.logger?.debug("failed to clear log directory");
     }
   }
 

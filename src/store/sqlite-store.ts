@@ -227,6 +227,16 @@ export class SqliteStore implements MessageStore {
     this.db.prepare("DELETE FROM kv WHERE key = ?").run("wechat.session");
   }
 
+  clearData(): void {
+    this.options.logger?.debug("clearing all data except session");
+    this.db.prepare("DELETE FROM messages").run();
+    this.db.prepare("DELETE FROM attachments").run();
+    this.db.prepare("DELETE FROM conversations").run();
+    this.db.prepare("DELETE FROM contacts").run();
+    this.db.prepare("DELETE FROM accounts").run();
+    this.db.prepare("DELETE FROM kv WHERE key != ?").run("wechat.session");
+  }
+
   upsertContact(contact: ContactInput): ContactRecord {
     const accountId = this.requireActiveAccountId("upsert contact");
     const now = Date.now();

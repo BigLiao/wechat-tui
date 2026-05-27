@@ -8,6 +8,8 @@ import { ConversationScreen } from "./conversation-screen.js";
 import { ChatScreen } from "./chat-screen.js";
 import { ContactSearchScreen } from "./contact-search-screen.js";
 import { ChatEditor } from "./components/chat-editor.js";
+import { CommandPanel } from "./components/command-panel.js";
+import { ConfirmPanel } from "./components/confirm-panel.js";
 
 const SEARCH_ITEM_VALUE = "__search__";
 
@@ -46,6 +48,10 @@ export class WechatApp implements Component {
   private readonly chatScreen: ChatScreen;
   private readonly contactSearchScreen = new ContactSearchScreen();
   private readonly chatEditor: ChatEditor;
+  private readonly commandPanel: CommandPanel;
+  private readonly confirmPanel: ConfirmPanel;
+  private commandPanelVisible = false;
+  private confirmPanelVisible = false;
   private conversationList: SelectList;
   private conversationItems: SelectItem[] = [];
   private conversationListSignature = "";
@@ -57,17 +63,44 @@ export class WechatApp implements Component {
     this.chatEditor = new ChatEditor(tui, onEvent);
     this.chatScreen = new ChatScreen(this.chatEditor);
     this.conversationList = this.createConversationList([], 5);
+    this.commandPanel = new CommandPanel();
+    this.commandPanel.onCommand = (command) => {
+      this.hideCommandPanel();
+      if (command === "/clear") {
+        this.showConfirmPanel();
+      } else {
+        const name = command.startsWith("/") ? command.slice(1) : command;
+        this.onEvent({ type: "key", key: { sequence: "", name: `command-${name}` } });
+      }
+    };
+    this.commandPanel.onCancel = () => {
+      this.hideCommandPanel();
+    };
+    this.confirmPanel = new ConfirmPanel();
+    this.confirmPanel.onConfirm = () => {
+      this.hideConfirmPanel();
+      this.onEvent({ type: "key", key: { sequence: "", name: "command-clear" } });
+    };
+    this.confirmPanel.onCancel = () => {
+      this.hideConfirmPanel();
+    };
   }
 
   setState(state: RenderState): void {
     this.state = state;
     if (state.view === "chat") {
+      this.commandPanelVisible = false;
+      this.confirmPanelVisible = false;
       this.chatEditor.syncText(state.chatInput);
       this.tui.setFocus(this.chatEditor.focusTarget);
     } else if (state.view === "chats") {
       this.syncConversationList(state);
-      this.tui.setFocus(this.conversationList);
+      if (!this.commandPanelVisible && !this.confirmPanelVisible) {
+        this.tui.setFocus(this.conversationList);
+      }
     } else {
+      this.commandPanelVisible = false;
+      this.confirmPanelVisible = false;
       this.tui.setFocus(null);
     }
   }
@@ -131,6 +164,31 @@ export class WechatApp implements Component {
     return this.state.view === "chat";
   }
 
+  isCommandPanelVisible(): boolean {
+    return this.commandPanelVisible || this.confirmPanelVisible;
+  }
+
+  showCommandPanel(): void {
+    this.commandPanelVisible = true;
+    this.confirmPanelVisible = false;
+    this.tui.setFocus(this.commandPanel.focusTarget);
+  }
+
+  hideCommandPanel(): void {
+    this.commandPanelVisible = false;
+    this.tui.setFocus(this.conversationList);
+  }
+
+  showConfirmPanel(): void {
+    this.confirmPanelVisible = true;
+    this.tui.setFocus(this.confirmPanel.focusTarget);
+  }
+
+  hideConfirmPanel(): void {
+    this.confirmPanelVisible = false;
+    this.tui.setFocus(this.conversationList);
+  }
+
   /**
    * Intercept bracketed paste data containing image file paths.
    * Returns transformed data (with image marker) or undefined if not an image path.
@@ -142,6 +200,8 @@ export class WechatApp implements Component {
   invalidate(): void {
     this.chatEditor.invalidate();
     this.conversationList.invalidate();
+    this.commandPanel.invalidate();
+    this.confirmPanel.invalidate();
   }
 
   render(width: number): string[] {
@@ -149,8 +209,10 @@ export class WechatApp implements Component {
     switch (this.state.view) {
       case "login":
         return this.loginScreen.render(this.state, width, rows);
-      case "chats":
-        return this.conversationScreen.render(this.state, width, rows, this.conversationList);
+      case "chats": {
+        const overlay = this.confirmPanelVisible ? this.confirmPanel : this.commandPanelVisible ? this.commandPanel : undefined;
+        return this.conversationScreen.render(this.state, width, rows, this.conversationList, overlay);
+      }
       case "chat":
         return this.chatScreen.render(this.state, width, rows);
       case "search":

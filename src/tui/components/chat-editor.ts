@@ -10,15 +10,7 @@ import { theme } from "../theme.js";
 import type { UiEvent } from "../../types.js";
 
 const COMMANDS = [
-  { name: "send", description: "Send a file (image, video, doc)" },
-  { name: "paste", description: "Send clipboard image" },
-  { name: "contacts", description: "Search contacts and groups" },
-  { name: "chats", description: "Return to recent chats" },
-  { name: "status", description: "Show connection status" },
-  { name: "refresh", description: "Refresh local contacts" },
-  { name: "load", description: "Load local history" },
-  { name: "messages", description: "Search local messages" },
-  { name: "quit", description: "Quit wechat-tui" }
+  { name: "send", description: "Send a file (image, video, doc)" }
 ];
 
 const selectListTheme: SelectListTheme = {
@@ -72,6 +64,14 @@ export class ChatEditor implements Component {
   }
 
   private handleSubmit(text: string): void {
+    // When /send is selected from autocomplete without a file path argument,
+    // put it back into the editor instead of submitting — let the user type the path.
+    if (/^\/send\s*$/.test(text)) {
+      this.syncText("/send ");
+      this.onEvent({ type: "chat-change", text: "/send " });
+      return;
+    }
+
     // Check for image markers in the submitted text
     const markerMatch = text.match(IMAGE_MARKER_REGEX);
     if (markerMatch) {
