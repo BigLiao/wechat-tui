@@ -461,11 +461,11 @@ function parseMessageContent(
     return {
       content,
       senderProtocolId: raw.ActualUserName ?? extractGroupSenderProtocolId(raw.OriginalContent) ?? extractGroupSenderProtocolId(raw.Content),
-      senderDisplayName: cleanText(raw.ActualNickName) || undefined
+      senderDisplayName: cleanGroupSenderDisplayName(raw.ActualNickName)
     };
   }
 
-  const senderDisplayName = cleanText(raw.ActualNickName) || cleanGroupSenderDisplayName(match[1]);
+  const senderDisplayName = cleanGroupSenderDisplayName(raw.ActualNickName) || cleanGroupSenderDisplayName(match[1]);
   return {
     senderProtocolId: raw.ActualUserName ?? extractGroupSenderProtocolId(raw.OriginalContent) ?? extractGroupSenderProtocolId(raw.Content),
     senderDisplayName,
@@ -849,21 +849,40 @@ function mergeGroupSenderContact(input: {
     UserName: input.senderProtocolId
   };
 
-  merged.RemarkName = firstCleanValue(input.groupMember?.RemarkName, input.directoryContact?.RemarkName);
-  merged.DisplayName = firstCleanValue(
+  const memberDisplayName = input.groupMember?.getDisplayName?.();
+  const directoryDisplayName = input.directoryContact?.getDisplayName?.();
+  const remarkName = firstUsefulGroupSenderName(input.groupMember?.RemarkName, input.directoryContact?.RemarkName);
+  const displayName = firstUsefulGroupSenderName(
+    memberDisplayName,
+    directoryDisplayName,
     input.groupMember?.DisplayName,
     input.directoryContact?.DisplayName,
     input.fallbackDisplayName
   );
-  merged.NickName = firstCleanValue(
+  const nickName = firstUsefulGroupSenderName(
     input.groupMember?.NickName,
     input.directoryContact?.NickName,
     input.fallbackNickName,
     input.fallbackDisplayName
   );
+
+  merged.RemarkName = remarkName;
+  merged.DisplayName = displayName ?? nickName ?? remarkName ?? "Group member";
+  merged.NickName = nickName ?? displayName ?? remarkName ?? "Group member";
   merged.Alias = firstCleanValue(input.groupMember?.Alias, input.directoryContact?.Alias);
+  merged.getDisplayName = () => remarkName ?? displayName ?? nickName ?? "Group member";
 
   return merged;
+}
+
+function firstUsefulGroupSenderName(...inputs: Array<unknown>): string | undefined {
+  for (const input of inputs) {
+    const value = cleanGroupSenderDisplayName(input);
+    if (value) {
+      return value;
+    }
+  }
+  return undefined;
 }
 
 function firstCleanValue(...inputs: Array<unknown>): string | undefined {

@@ -47,7 +47,7 @@ function formatMessage(message: MessageRecord, conversation: ConversationRecord,
   // Header: [HH:MM] Sender
   const sender = message.isSelf
     ? "You"
-    : (conversation.kind === "group" ? message.senderName : conversation.title);
+    : (conversation.kind === "group" ? readableGroupSenderName(message.senderName) : conversation.title);
   const time = formatClock(message.timestamp);
   const senderStyled = message.isSelf ? theme.selfName(sender) : theme.otherName(sender);
   const timeStyled = theme.dim(`[${time}]`);
@@ -63,6 +63,14 @@ function formatMessage(message: MessageRecord, conversation: ConversationRecord,
   }
 
   return lines;
+}
+
+function readableGroupSenderName(input: string | undefined): string {
+  const name = input?.trim();
+  if (!name || name === "Unknown" || name.startsWith("@")) {
+    return "Group member";
+  }
+  return name;
 }
 
 function messageDisplayContent(message: MessageRecord): string {

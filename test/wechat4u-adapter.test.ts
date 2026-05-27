@@ -324,4 +324,44 @@ describe("normalizeWechat4uMessage", () => {
     expect(message?.sender.displayName).toBe("Alice");
     expect(message?.content).toBe("hello");
   });
+
+  it("does not display bare protocol ids for sparse group sticker senders", () => {
+    const message = normalizeWechat4uMessage(
+      {
+        MsgId: "group-sticker-1",
+        FromUserName: "@@project",
+        ToUserName: "@me",
+        ActualUserName: "@0f2e2a0d4003e6a22454e192b282b96a",
+        MsgType: 47,
+        Content: "",
+        CreateTime: 1_700_000_000
+      },
+      bot
+    );
+
+    expect(message?.type).toBe("sticker");
+    expect(message?.sender.protocolId).toBe("@0f2e2a0d4003e6a22454e192b282b96a");
+    expect(message?.sender.displayName).toBe("Group member");
+    expect(message?.content).toBe("[sticker]");
+  });
+
+  it("uses ActualNickName for sparse group sticker senders when available", () => {
+    const message = normalizeWechat4uMessage(
+      {
+        MsgId: "group-sticker-2",
+        FromUserName: "@@project",
+        ToUserName: "@me",
+        ActualUserName: "@sticker-sender",
+        ActualNickName: "贴纸达人",
+        MsgType: 47,
+        Content: "",
+        CreateTime: 1_700_000_000
+      },
+      bot
+    );
+
+    expect(message?.type).toBe("sticker");
+    expect(message?.sender.displayName).toBe("贴纸达人");
+    expect(message?.content).toBe("[sticker]");
+  });
 });

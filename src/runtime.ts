@@ -528,7 +528,7 @@ export class WeChatRuntime extends EventEmitter {
       return;
     }
     const contact = results[clamp(this.selectedSearchIndex, 0, results.length - 1)];
-    const conversation = this.store.upsertConversation(conversationFromStoredContact(contact));
+    const conversation = this.store.upsertConversation(this.conversationFromStoredContact(contact));
     this.openConversation(conversation);
   }
 
@@ -741,8 +741,15 @@ export class WeChatRuntime extends EventEmitter {
 
   private handleIncomingMessage(incoming: IncomingProtocolMessage): void {
     const scopedIncoming = this.scopeIncomingMessage(incoming);
-    this.store.upsertContact(contactFromConversationInput(scopedIncoming.conversation));
-    if (scopedIncoming.sender.id !== scopedIncoming.conversation.id || scopedIncoming.conversation.kind !== "group") {
+    this.store.upsertContact(this.contactFromConversationInput(scopedIncoming.conversation));
+    const senderIsGroupConversation =
+      scopedIncoming.conversation.kind === "group" &&
+      !!scopedIncoming.sender.protocolId &&
+      scopedIncoming.sender.protocolId === scopedIncoming.conversation.protocolId;
+    if (
+      !senderIsGroupConversation &&
+      (scopedIncoming.sender.id !== scopedIncoming.conversation.id || scopedIncoming.conversation.kind !== "group")
+    ) {
       this.store.upsertContact(scopedIncoming.sender);
     }
     const isActive = this.activeConversationId === scopedIncoming.conversation.id;
@@ -870,6 +877,46 @@ export class WeChatRuntime extends EventEmitter {
     return this.store.findConversationById(this.activeConversationId);
   }
 
+  private conversationFromStoredContact(contact: ContactRecord): ConversationInput {
+    const contactId = this.unscopedId(contact.id);
+    const conversation = conversationFromContact({
+      id: contactId,
+      protocolId: contact.protocolId,
+      kind: contact.kind,
+      displayName: contact.displayName,
+      remarkName: contact.remarkName,
+      nickName: contact.nickName,
+      alias: contact.alias,
+      isSelf: contact.isSelf,
+      raw: contact.raw
+    });
+
+    return {
+      ...conversation,
+      id: this.scopeId(contactId.startsWith("conversation:") ? contactId : conversation.id)
+    };
+  }
+
+  private contactFromConversationInput(conversation: ConversationInput): ContactInput {
+    const conversationId = this.unscopedId(conversation.id);
+    const contactId = conversationId.startsWith("conversation:")
+      ? conversationId.slice("conversation:".length)
+      : conversationId;
+
+    return {
+      id: this.scopeId(contactId),
+      protocolId: conversation.protocolId,
+      kind: conversation.kind,
+      displayName: conversation.title,
+      isSelf: false
+    };
+  }
+
+  private unscopedId(id: string): string {
+    const prefix = this.activeAccountId ? `${this.activeAccountId}:` : "";
+    return prefix && id.startsWith(prefix) ? id.slice(prefix.length) : id;
+  }
+
   private activeMessageLimit(): number {
     const base = this.options.initialHistoryLimit ?? 30;
     const max = Math.max(base, 500);
@@ -909,30 +956,6 @@ function conversationInputFromRecord(record: ConversationRecord): ConversationIn
     protocolId: record.protocolId,
     kind: record.kind,
     title: record.title
-  };
-}
-
-function conversationFromStoredContact(contact: ContactRecord): ConversationInput {
-  return conversationFromContact({
-    id: contact.id,
-    protocolId: contact.protocolId,
-    kind: contact.kind,
-    displayName: contact.displayName,
-    remarkName: contact.remarkName,
-    nickName: contact.nickName,
-    alias: contact.alias,
-    isSelf: contact.isSelf,
-    raw: contact.raw
-  });
-}
-
-function contactFromConversationInput(conversation: ConversationInput): ContactInput {
-  return {
-    id: conversation.id,
-    protocolId: conversation.protocolId,
-    kind: conversation.kind,
-    displayName: conversation.title,
-    isSelf: false
   };
 }
 

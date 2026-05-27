@@ -78,6 +78,31 @@ describe("WorkbenchTerminalRenderer", () => {
     expect(stripAnsi(output)).not.toContain("很长的链接标题");
   });
 
+  it("renders sparse group preview senders with a readable fallback", () => {
+    const output = renderState(
+      baseState({
+        conversations: [
+          {
+            id: "conversation:project",
+            protocolId: "@@project",
+            kind: "group",
+            title: "Project A",
+            unreadCount: 0,
+            lastMessagePreview: "[sticker]",
+            lastMessageSenderName: "@0f2e2a0d4003e6a22454e192b282b96a",
+            lastMessageIsSelf: false,
+            lastMessageAt: 1_700_000_000_000,
+            updatedAt: 1_700_000_000_000
+          }
+        ]
+      })
+    );
+
+    const plain = stripAnsi(output);
+    expect(plain).toContain("Group member: [sticker]");
+    expect(plain).not.toContain("@0f2e2a0d4003e6a22454e192b282b96a");
+  });
+
   it("renders only the active chat body and summarizes other unread conversations", () => {
     const output = renderState(
       baseState({
@@ -156,6 +181,39 @@ describe("WorkbenchTerminalRenderer", () => {
 
     expect(output).toContain("[image]");
     expect(output).not.toContain("<xml />");
+  });
+
+  it("renders sparse group message senders with a readable fallback", () => {
+    const output = renderState(
+      baseState({
+        view: "chat",
+        activeConversation: {
+          id: "conversation:project",
+          protocolId: "@@project",
+          kind: "group",
+          title: "Project A",
+          unreadCount: 0,
+          updatedAt: 1_700_000_000_000
+        },
+        messages: [
+          {
+            id: "message:1",
+            conversationId: "conversation:project",
+            senderName: "@0f2e2a0d4003e6a22454e192b282b96a",
+            isSelf: false,
+            content: "[sticker]",
+            type: "sticker",
+            timestamp: 1_700_000_000_000,
+            createdAt: 1_700_000_000_000
+          }
+        ]
+      })
+    );
+
+    const plain = stripAnsi(output);
+    expect(plain).toContain("Group member");
+    expect(plain).toContain("[sticker]");
+    expect(plain).not.toContain("@0f2e2a0d4003e6a22454e192b282b96a");
   });
 
   it("renders older message list content when the chat scroll offset is above the bottom", () => {

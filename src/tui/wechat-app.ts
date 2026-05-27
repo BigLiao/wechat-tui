@@ -76,9 +76,11 @@ export class WechatApp implements Component {
     const items: SelectItem[] = state.conversations.map((c) => {
       const badge = c.unreadCount > 0 ? ` (${c.unreadCount})` : "";
       const label = `${c.title}${badge}`;
+      const lastMessageSenderName =
+        c.kind === "group" ? readableGroupSenderName(c.lastMessageSenderName) : c.lastMessageSenderName;
       const preview = c.lastMessagePreview
-        ? ((c.kind === "group" || c.title === "公众号") && c.lastMessageSenderName
-            ? `${c.lastMessageIsSelf ? "You" : c.lastMessageSenderName}: ${c.lastMessagePreview}`
+        ? ((c.kind === "group" || c.title === "公众号") && lastMessageSenderName
+            ? `${c.lastMessageIsSelf ? "You" : lastMessageSenderName}: ${c.lastMessagePreview}`
             : c.lastMessageIsSelf ? `You: ${c.lastMessagePreview}` : c.lastMessagePreview)
         : undefined;
       return { value: c.id, label, description: preview ? truncatePreview(preview, 24) : undefined };
@@ -162,6 +164,14 @@ function conversationListSignature(items: SelectItem[], maxVisible: number): str
     maxVisible,
     items: items.map((item) => [item.value, item.label, item.description ?? ""])
   });
+}
+
+function readableGroupSenderName(input: string | undefined): string {
+  const name = input?.trim();
+  if (!name || name === "Unknown" || name.startsWith("@")) {
+    return "Group member";
+  }
+  return name;
 }
 
 function truncatePreview(input: string, maxWidth: number): string {

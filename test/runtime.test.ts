@@ -60,6 +60,10 @@ class ContactsBeforeLoginProtocol extends EventEmitter implements WeChatProtocol
     return {};
   }
 
+  async sendFile(): Promise<{ messageId?: string; raw?: unknown }> {
+    return {};
+  }
+
   async getContacts(): Promise<ContactInput[]> {
     return this.contacts;
   }
@@ -98,6 +102,10 @@ class PublicConversationProtocol extends EventEmitter implements WeChatProtocol 
   }
 
   async sendText(): Promise<{ messageId?: string; raw?: unknown }> {
+    return {};
+  }
+
+  async sendFile(): Promise<{ messageId?: string; raw?: unknown }> {
     return {};
   }
 
@@ -220,6 +228,7 @@ describe("WeChatRuntime", () => {
     await runtime.handleKey(key.escape());
     expect(renderer.latest.view).toBe("chats");
     expect(renderer.latest.conversations.map((conversation) => conversation.title)).toContain("Project A");
+    const projectConversationFromRecent = renderer.latest.conversations.find((conversation) => conversation.title === "Project A");
 
     const before = renderer.latest.selectedConversationIndex;
     await runtime.handleKey(key.down());
@@ -241,6 +250,8 @@ describe("WeChatRuntime", () => {
     await runtime.handleKey(key.enter());
     expect(renderer.latest.view).toBe("chat");
     expect(renderer.latest.activeConversation?.title).toBe("Project A");
+    expect(renderer.latest.activeConversation?.id).toBe(projectConversationFromRecent?.id);
+    expect(renderer.latest.messages.map((message) => message.content)).toContain("field changed");
     store.close();
   });
 
