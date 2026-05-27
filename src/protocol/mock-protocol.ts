@@ -68,6 +68,11 @@ export class MockProtocol extends EventEmitter implements WeChatProtocol {
     return { messageId, raw: { ok: true } };
   }
 
+  async sendFile(toProtocolId: string, filePath: string): Promise<{ messageId?: string; raw?: unknown }> {
+    const messageId = localMessageId(["mock-send-file", toProtocolId, filePath, String(Date.now())]);
+    return { messageId, raw: { ok: true, filePath } };
+  }
+
   async getContacts(): Promise<ContactInput[]> {
     return this.contacts;
   }

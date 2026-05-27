@@ -1,4 +1,8 @@
 import { EventEmitter } from "node:events";
+import { existsSync } from "node:fs";
+import { resolve, basename, extname } from "node:path";
+import { homedir, tmpdir, platform } from "node:os";
+import { execSync } from "node:child_process";
 import type { Logger } from "pino";
 import {
   preview,
@@ -16,6 +20,7 @@ import type {
   ConversationRecord,
   IncomingProtocolMessage,
   MessageInput,
+  MessageKind,
   MessageStore,
   RenderState,
   UiEvent,
@@ -118,6 +123,8 @@ export class WeChatRuntime extends EventEmitter {
     try {
       if (event.type === "chat-change") {
         this.chatInput = event.text;
+      } else if (event.type === "file-submit") {
+        await this.sendFileToActiveConversation(event.filePath);
       } else {
         await this.submitChatText(event.text);
       }
@@ -442,6 +449,24 @@ export class WeChatRuntime extends EventEmitter {
       case "/messages":
         this.errorMessage = "/messages local message search is not implemented yet";
         return;
+      case "/send": {
+        const filePath = command.slice(name.length).trim();
+        if (filePath) {
+          await this.sendFileToActiveConversation(filePath);
+        } else {
+          this.errorMessage = "usage: /send <file-path>";
+        }
+        return;
+      }
+      case "/paste": {
+        const tempPath = this.extractClipboardImage();
+        if (tempPath) {
+          await this.sendFileToActiveConversation(tempPath);
+        } else {
+          this.errorMessage = "No image found in clipboard";
+        }
+        return;
+      }
       case "/quit":
         this.requestExit();
         return;
@@ -618,6 +643,99 @@ export class WeChatRuntime extends EventEmitter {
     } catch (error) {
       this.options.logger?.error({ err: error, conversationId: activeConversation.id }, "failed to send message");
       this.errorMessage = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  private async sendFileToActiveConversation(rawPath: string): Promise<void> {
+    if (!rawPath) {
+      this.errorMessage = "usage: /send <file-path>";
+      return;
+    }
+    const activeConversation = this.getActiveConversation();
+    if (!activeConversation) {
+      this.errorMessage = "no active conversation";
+      return;
+    }
+    if (!activeConversation.protocolId) {
+      this.errorMessage = "active conversation has no current protocol id";
+      return;
+    }
+
+    const filePath = resolveFilePath(rawPath);
+    if (!existsSync(filePath)) {
+      this.errorMessage = `file not found: ${filePath}`;
+      return;
+    }
+
+    const filename = basename(filePath);
+    const type = detectFileMessageKind(filePath);
+    this.options.logger?.debug(
+      { conversationId: activeConversation.id, filePath, filename, type },
+      "sending file to active conversation"
+    );
+
+    try {
+      const sent = await this.protocol.sendFile(activeConversation.protocolId, filePath);
+      const now = Date.now();
+      const currentUser = this.protocol.getCurrentUser();
+      const content = `[${type}] ${filename}`;
+      const message: MessageInput = {
+        id: this.scopeId(sent.messageId ? `wechat:${sent.messageId}` : localMessageId([activeConversation.id, content, String(now)])),
+        protocolMessageId: sent.messageId,
+        conversationId: activeConversation.id,
+        senderId: currentUser ? this.scopeId(currentUser.id) : undefined,
+        senderName: "You",
+        isSelf: true,
+        content,
+        type,
+        timestamp: now,
+        raw: sent.raw
+      };
+      const saved = this.store.saveMessage(message, conversationInputFromRecord(activeConversation), false);
+      this.store.markRead(activeConversation.id);
+      this.messageScrollOffset = 0;
+      this.persistSessionData();
+      this.statusMessage = `${type} sent: ${filename}`;
+      this.options.logger?.info(
+        { conversationId: activeConversation.id, sentMessageId: sent.messageId, message: summarizeStoredMessage(saved) },
+        "file sent to active conversation"
+      );
+    } catch (error) {
+      this.options.logger?.error({ err: error, conversationId: activeConversation.id, filePath }, "failed to send file");
+      this.errorMessage = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  private extractClipboardImage(): string | undefined {
+    const os = platform();
+    const tempFile = resolve(tmpdir(), `wechat-tui-paste-${Date.now()}.png`);
+
+    try {
+      if (os === "darwin") {
+        // macOS: use osascript to write clipboard image to a temp file
+        execSync(
+          `osascript -e 'set imageData to the clipboard as «class PNGf»' -e 'set filePath to POSIX file "${tempFile}"' -e 'set fileRef to open for access filePath with write permission' -e 'write imageData to fileRef' -e 'close access fileRef'`,
+          { stdio: "pipe", timeout: 5000 }
+        );
+      } else if (os === "linux") {
+        // Linux: use xclip to write clipboard image
+        execSync(`xclip -selection clipboard -t image/png -o > "${tempFile}"`, {
+          stdio: "pipe",
+          shell: "/bin/sh",
+          timeout: 5000
+        });
+      } else {
+        this.options.logger?.warn({ platform: os }, "clipboard image paste not supported on this platform");
+        return undefined;
+      }
+
+      if (existsSync(tempFile)) {
+        return tempFile;
+      }
+      return undefined;
+    } catch {
+      this.options.logger?.debug({ platform: os }, "no image in clipboard or clipboard tool not available");
+      return undefined;
     }
   }
 
@@ -890,4 +1008,22 @@ function clampSelection(index: number, length: number): number {
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max);
+}
+
+function resolveFilePath(rawPath: string): string {
+  const trimmed = rawPath.trim();
+  if (trimmed.startsWith("~")) {
+    return resolve(homedir(), trimmed.slice(trimmed.startsWith("~/") ? 2 : 1));
+  }
+  return resolve(trimmed);
+}
+
+const IMAGE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp"]);
+const VIDEO_EXTENSIONS = new Set([".mp4", ".mov", ".avi", ".mkv", ".webm"]);
+
+function detectFileMessageKind(filePath: string): MessageKind {
+  const ext = extname(filePath).toLowerCase();
+  if (IMAGE_EXTENSIONS.has(ext)) return "image";
+  if (VIDEO_EXTENSIONS.has(ext)) return "video";
+  return "file";
 }

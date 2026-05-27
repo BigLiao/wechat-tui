@@ -1,5 +1,7 @@
 import { EventEmitter } from "node:events";
 import { createRequire } from "node:module";
+import { createReadStream, existsSync } from "node:fs";
+import { basename } from "node:path";
 import type { Logger } from "pino";
 import type {
   ConnectionState,
@@ -28,7 +30,7 @@ type RawWechatBot = EventEmitter & {
   stop(): void;
   setPollingTargetGetter?: (getter: () => string) => void;
   sendText?: (text: string, toUserName: string) => Promise<unknown>;
-  sendMsg?: (text: string, toUserName: string) => Promise<unknown>;
+  sendMsg?: (msg: string | { file: unknown; filename: string }, toUserName: string) => Promise<unknown>;
 };
 
 interface RawContact {
@@ -145,6 +147,30 @@ export class Wechat4uAdapter extends EventEmitter implements WeChatProtocol {
     const raw = await sender.call(this.bot, text, toProtocolId);
     const messageId = extractSentMessageId(raw);
     this.options.logger?.debug({ toProtocolId, messageId, raw: summarizeRawWechatMessage(raw) }, "wechat text send completed");
+    return { messageId, raw };
+  }
+
+  async sendFile(toProtocolId: string, filePath: string): Promise<{ messageId?: string; raw?: unknown }> {
+    if (!this.bot) {
+      throw new Error("WeChat protocol is not started");
+    }
+    const sender = this.bot.sendMsg;
+    if (!sender) {
+      throw new Error("wechat4u does not expose sendMsg method");
+    }
+    if (!existsSync(filePath)) {
+      throw new Error(`File not found: ${filePath}`);
+    }
+
+    const filename = basename(filePath);
+    const file = createReadStream(filePath);
+    this.options.logger?.debug(
+      { toProtocolId, filePath, filename },
+      "sending wechat file"
+    );
+    const raw = await sender.call(this.bot, { file, filename }, toProtocolId);
+    const messageId = extractSentMessageId(raw);
+    this.options.logger?.debug({ toProtocolId, messageId, raw: summarizeRawWechatMessage(raw) }, "wechat file send completed");
     return { messageId, raw };
   }
 

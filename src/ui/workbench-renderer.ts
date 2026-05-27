@@ -11,6 +11,9 @@ import type { Terminal } from "@earendil-works/pi-tui";
 import type { RenderState, UiEvent, UiKey, WorkbenchRenderer } from "../types.js";
 import { WechatApp } from "../tui/wechat-app.js";
 
+const BRACKETED_PASTE_START = "\x1b[200~";
+const BRACKETED_PASTE_END = "\x1b[201~";
+
 export class WorkbenchTerminalRenderer implements WorkbenchRenderer {
   private tui?: TUI;
   private app?: WechatApp;
@@ -24,6 +27,14 @@ export class WorkbenchTerminalRenderer implements WorkbenchRenderer {
     this.app = new WechatApp(this.tui, onEvent);
     this.tui.addChild(this.app);
     this.removeInputListener = this.tui.addInputListener((data) => {
+      // Intercept bracketed paste containing image file paths in chat view
+      if (this.app?.isChatView() && data.includes(BRACKETED_PASTE_START)) {
+        const transformed = this.app.transformPasteInput(data);
+        if (transformed !== undefined) {
+          return { data: transformed };
+        }
+      }
+
       const key = rawInputToKey(data);
       if (!key) {
         return undefined;

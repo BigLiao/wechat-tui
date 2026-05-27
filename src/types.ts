@@ -129,6 +129,7 @@ export interface WeChatProtocol extends EventEmitter {
   reconnect(): Promise<void>;
   logout(): Promise<void>;
   sendText(toProtocolId: string, text: string): Promise<{ messageId?: string; raw?: unknown }>;
+  sendFile(toProtocolId: string, filePath: string): Promise<{ messageId?: string; raw?: unknown }>;
   getContacts(): Promise<ContactInput[]>;
   getCurrentUser(): UserProfile | undefined;
   getSessionData(): unknown | undefined;
@@ -156,7 +157,8 @@ export type UiEvent =
   | { type: "conversation-select"; index: number }
   | { type: "conversation-open"; conversationId?: string }
   | { type: "chat-change"; text: string }
-  | { type: "chat-submit"; text: string };
+  | { type: "chat-submit"; text: string }
+  | { type: "file-submit"; filePath: string };
 
 export interface RenderState {
   view: AppView;

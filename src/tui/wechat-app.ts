@@ -129,6 +129,14 @@ export class WechatApp implements Component {
     return this.state.view === "chat";
   }
 
+  /**
+   * Intercept bracketed paste data containing image file paths.
+   * Returns transformed data (with image marker) or undefined if not an image path.
+   */
+  transformPasteInput(data: string): string | undefined {
+    return this.chatEditor.transformPasteData(data);
+  }
+
   invalidate(): void {
     this.chatEditor.invalidate();
     this.conversationList.invalidate();
