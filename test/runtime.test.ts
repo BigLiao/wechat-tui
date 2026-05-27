@@ -1,0 +1,135 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { afterEach, describe, expect, it } from "vitest";
+import { MockProtocol } from "../src/protocol/mock-protocol.js";
+import { WeChatRuntime } from "../src/runtime.js";
+import { SqliteStore } from "../src/store/sqlite-store.js";
+import { FakeRenderer, key } from "./helpers.js";
+
+const tempDirs: string[] = [];
+
+function tempDb(): string {
+  const dir = mkdtempSync(join(tmpdir(), "wechat-tui-runtime-"));
+  tempDirs.push(dir);
+  return join(dir, "db.sqlite");
+}
+
+async function pressText(runtime: WeChatRuntime, value: string): Promise<void> {
+  for (const char of value) {
+    await runtime.handleKey(key.text(char));
+  }
+}
+
+afterEach(() => {
+  for (const dir of tempDirs.splice(0)) {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+describe("WeChatRuntime", () => {
+  it("uses redraw state for chats, keyboard navigation, chat input, unread status, and search", async () => {
+    const store = new SqliteStore(tempDb());
+    const protocol = new MockProtocol();
+    const renderer = new FakeRenderer();
+    const runtime = new WeChatRuntime(protocol, store, renderer, { initialHistoryLimit: 10 });
+
+    await runtime.start();
+    expect(renderer.latest.view).toBe("chats");
+
+    protocol.emitIncoming("Boss", "meet at three", 1_700_000_000_000);
+    expect(renderer.latest.view).toBe("chats");
+    expect(renderer.latest.conversations[0]?.title).toBe("Boss");
+    expect(renderer.latest.conversations[0]?.unreadCount).toBe(1);
+
+    await runtime.handleKey(key.enter());
+    expect(renderer.latest.view).toBe("chat");
+    expect(renderer.latest.activeConversation?.title).toBe("Boss");
+    expect(store.totalUnreadCount()).toBe(0);
+    expect(renderer.latest.messages.map((message) => message.content)).toContain("meet at three");
+
+    await pressText(runtime, "yes");
+    expect(renderer.latest.chatInput).toBe("yes");
+    await runtime.handleKey(key.enter());
+    expect(renderer.latest.messages.map((message) => message.content)).toContain("yes");
+
+    protocol.emitIncoming("Project A", "field changed", 1_700_000_100_000);
+    expect(renderer.latest.view).toBe("chat");
+    expect(renderer.latest.messages.every((message) => message.conversationId === renderer.latest.activeConversation?.id)).toBe(true);
+    expect(renderer.latest.unreadConversations.some((conversation) => conversation.title === "Project A")).toBe(true);
+    expect(store.totalUnreadCount()).toBe(1);
+
+    await runtime.handleKey(key.escape());
+    expect(renderer.latest.view).toBe("chats");
+    expect(renderer.latest.conversations.map((conversation) => conversation.title)).toContain("Project A");
+
+    const before = renderer.latest.selectedConversationIndex;
+    await runtime.handleKey(key.down());
+    expect(renderer.latest.selectedConversationIndex).toBeGreaterThanOrEqual(before);
+    await runtime.handleKey(key.up());
+    expect(renderer.latest.selectedConversationIndex).toBeGreaterThanOrEqual(0);
+
+    // Navigate down to the "🔍搜索" item (past all conversations) and press enter
+    const conversationCount = renderer.latest.conversations.length;
+    for (let i = 0; i <= conversationCount; i++) {
+      await runtime.handleKey(key.down());
+    }
+    await runtime.handleKey(key.enter());
+    expect(renderer.latest.view).toBe("search");
+
+    await pressText(runtime, "Project");
+    expect(renderer.latest.searchKeyword).toBe("Project");
+    expect(renderer.latest.searchResults[0]?.displayName).toBe("Project A");
+    await runtime.handleKey(key.enter());
+    expect(renderer.latest.view).toBe("chat");
+    expect(renderer.latest.activeConversation?.title).toBe("Project A");
+    store.close();
+  });
+
+  it("navigates to search via the search item in conversation list", async () => {
+    const store = new SqliteStore(tempDb());
+    const protocol = new MockProtocol();
+    const renderer = new FakeRenderer();
+    const runtime = new WeChatRuntime(protocol, store, renderer, { initialHistoryLimit: 10 });
+
+    await runtime.start();
+    protocol.emitIncoming("Boss", "meet at three", 1_700_000_000_000);
+    protocol.emitIncoming("Project A", "field changed", 1_700_000_100_000);
+
+    // Navigate to search item (2 conversations + 1 search item = index 2)
+    await runtime.handleKey(key.down());
+    await runtime.handleKey(key.down());
+    expect(renderer.latest.selectedConversationIndex).toBe(2);
+    await runtime.handleKey(key.enter());
+    expect(renderer.latest.view).toBe("search");
+
+    await pressText(runtime, "Boss");
+    expect(renderer.latest.searchResults.some((r) => r.displayName === "Boss")).toBe(true);
+    await runtime.handleKey(key.enter());
+    expect(renderer.latest.view).toBe("chat");
+    expect(renderer.latest.activeConversation?.title).toBe("Boss");
+    store.close();
+  });
+
+  it("opens the conversation selected by the pi-tui SelectList event", async () => {
+    const store = new SqliteStore(tempDb());
+    const protocol = new MockProtocol();
+    const renderer = new FakeRenderer();
+    const runtime = new WeChatRuntime(protocol, store, renderer, { initialHistoryLimit: 10 });
+
+    await runtime.start();
+    protocol.emitIncoming("Boss", "meet at three", 1_700_000_000_000);
+    protocol.emitIncoming("Project A", "field changed", 1_700_000_100_000);
+
+    const boss = renderer.latest.conversations.find((conversation) => conversation.title === "Boss");
+    expect(boss).toBeDefined();
+
+    await runtime.handleUiEvent({ type: "conversation-select", index: 1 });
+    expect(renderer.latest.selectedConversationIndex).toBe(1);
+
+    await runtime.handleUiEvent({ type: "conversation-open", conversationId: boss?.id });
+    expect(renderer.latest.view).toBe("chat");
+    expect(renderer.latest.activeConversation?.title).toBe("Boss");
+    store.close();
+  });
+});

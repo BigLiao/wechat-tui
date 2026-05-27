@@ -1,0 +1,155 @@
+import { SelectList } from "@earendil-works/pi-tui";
+import type { Component, SelectItem, SelectListTheme, TUI } from "@earendil-works/pi-tui";
+import type { RenderState, UiEvent } from "../types.js";
+import { colors } from "./theme.js";
+import { LoginScreen } from "./login-screen.js";
+import { ConversationScreen } from "./conversation-screen.js";
+import { ChatScreen } from "./chat-screen.js";
+import { ContactSearchScreen } from "./contact-search-screen.js";
+import { ChatEditor } from "./components/chat-editor.js";
+
+const SEARCH_ITEM_VALUE = "__search__";
+
+const selectListTheme: SelectListTheme = {
+  selectedPrefix: (text) => colors.primary(text),
+  selectedText: (text) => colors.primary(text),
+  description: (text) => colors.muted(text),
+  scrollInfo: (text) => colors.muted(text),
+  noMatch: (text) => colors.muted(text)
+};
+
+function emptyState(): RenderState {
+  return {
+    view: "login",
+    connectionState: "init",
+    conversations: [],
+    conversationQuery: "",
+    selectedConversationIndex: 0,
+    conversationFocus: "list",
+    messages: [],
+    searchKeyword: "",
+    searchResults: [],
+    selectedSearchIndex: 0,
+    chatInput: "",
+    commandInput: "",
+    totalUnreadCount: 0,
+    unreadConversations: []
+  };
+}
+
+export class WechatApp implements Component {
+  private state: RenderState = emptyState();
+  private readonly loginScreen = new LoginScreen();
+  private readonly conversationScreen = new ConversationScreen();
+  private readonly chatScreen: ChatScreen;
+  private readonly contactSearchScreen = new ContactSearchScreen();
+  private readonly chatEditor: ChatEditor;
+  private conversationList: SelectList;
+  private conversationItems: SelectItem[] = [];
+  private conversationListSignature = "";
+
+  constructor(
+    private readonly tui: TUI,
+    private readonly onEvent: (event: UiEvent) => void
+  ) {
+    this.chatEditor = new ChatEditor(tui, onEvent);
+    this.chatScreen = new ChatScreen(this.chatEditor);
+    this.conversationList = this.createConversationList([], 5);
+  }
+
+  setState(state: RenderState): void {
+    this.state = state;
+    if (state.view === "chat") {
+      this.chatEditor.syncText(state.chatInput);
+      this.tui.setFocus(this.chatEditor.focusTarget);
+    } else if (state.view === "chats") {
+      this.syncConversationList(state);
+      this.tui.setFocus(this.conversationList);
+    } else {
+      this.tui.setFocus(null);
+    }
+  }
+
+  private syncConversationList(state: RenderState): void {
+    const items: SelectItem[] = state.conversations.map((c) => {
+      const badge = c.unreadCount > 0 ? ` (${c.unreadCount})` : "";
+      const label = `${c.title}${badge}`;
+      const preview = c.lastMessagePreview
+        ? (c.kind === "group" && c.lastMessageSenderName
+            ? `${c.lastMessageIsSelf ? "You" : c.lastMessageSenderName}: ${c.lastMessagePreview}`
+            : c.lastMessageIsSelf ? `You: ${c.lastMessagePreview}` : c.lastMessagePreview)
+        : undefined;
+      return { value: c.id, label, description: preview };
+    });
+    items.push({ value: SEARCH_ITEM_VALUE, label: "Search contacts", description: "/contacts" });
+
+    const statusLineCount = (state.statusMessage ? 1 : 0) + (state.errorMessage ? 1 : 0);
+    const listAreaHeight = Math.max(1, this.tui.terminal.rows - 3 - statusLineCount - 1);
+    const maxVisible =
+      items.length > listAreaHeight ? Math.max(1, listAreaHeight - 1) : Math.max(1, Math.min(items.length, listAreaHeight));
+    const signature = conversationListSignature(items, maxVisible);
+    if (signature !== this.conversationListSignature) {
+      this.conversationItems = items;
+      this.conversationList = this.createConversationList(items, maxVisible);
+      this.conversationListSignature = signature;
+    }
+    this.conversationList.setSelectedIndex(state.selectedConversationIndex);
+  }
+
+  private createConversationList(items: SelectItem[], maxVisible: number): SelectList {
+    const list = new SelectList(items, maxVisible, selectListTheme, {
+      minPrimaryColumnWidth: 16,
+      maxPrimaryColumnWidth: 40
+    });
+    list.onSelectionChange = (item) => {
+      const index = this.conversationItems.findIndex((candidate) => candidate.value === item.value);
+      if (index >= 0) {
+        this.onEvent({ type: "conversation-select", index });
+      }
+    };
+    list.onSelect = (item) => {
+      this.onEvent({
+        type: "conversation-open",
+        conversationId: item.value === SEARCH_ITEM_VALUE ? undefined : item.value
+      });
+    };
+    list.onCancel = () => {
+      this.onEvent({ type: "key", key: { sequence: "\u001b", name: "escape" } });
+    };
+    return list;
+  }
+
+  isChatsView(): boolean {
+    return this.state.view === "chats";
+  }
+
+  isChatView(): boolean {
+    return this.state.view === "chat";
+  }
+
+  invalidate(): void {
+    this.chatEditor.invalidate();
+    this.conversationList.invalidate();
+  }
+
+  render(width: number): string[] {
+    const rows = this.tui.terminal.rows;
+    switch (this.state.view) {
+      case "login":
+        return this.loginScreen.render(this.state, width, rows);
+      case "chats":
+        return this.conversationScreen.render(this.state, width, rows, this.conversationList);
+      case "chat":
+        return this.chatScreen.render(this.state, width, rows);
+      case "search":
+        return this.contactSearchScreen.render(this.state, width, rows);
+    }
+  }
+}
+
+function conversationListSignature(items: SelectItem[], maxVisible: number): string {
+  return JSON.stringify({
+    maxVisible,
+    items: items.map((item) => [item.value, item.label, item.description ?? ""])
+  });
+}

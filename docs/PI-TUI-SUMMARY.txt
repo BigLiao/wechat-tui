@@ -1,0 +1,550 @@
+================================================================================
+PI-TUI LIBRARY INVESTIGATION - COMPREHENSIVE SUMMARY
+================================================================================
+
+PROJECT: WeChat TUI (wechat-tui)
+INVESTIGATION DATE: 2026-05-26
+PI-TUI VERSION: 0.75.5 (@earendil-works/pi-tui)
+NODE REQUIREMENT: >= 22.19.0
+
+================================================================================
+1. PACKAGE INFORMATION
+================================================================================
+
+NPM Package:
+  - Name: @earendil-works/pi-tui
+  - Version: 0.75.5
+  - Type: ES Module
+  - Main Entry: dist/index.js
+  - Types: dist/index.d.ts
+  - Repository: https://github.com/earendil-works/pi-mono
+  - Directory: packages/tui
+  - License: MIT
+  - Author: Mario Zechner
+
+Dependencies:
+  - get-east-asian-width: 1.6.0 (for CJK text width calculation)
+  - marked: 15.0.12 (for markdown parsing)
+
+Dev Dependencies:
+  - @xterm/xterm: 5.5.0, @xterm/headless: 5.5.0 (for testing)
+  - chalk: 5.6.2 (for ANSI styling)
+
+================================================================================
+2. CORE CONCEPTS & ARCHITECTURE
+================================================================================
+
+A. COMPONENT-BASED ARCHITECTURE
+   - All UI elements implement the minimal Component interface
+   - Simple render() method that returns array of strings (lines)
+   - Optional handleInput() for keyboard handling
+   - Optional invalidate() for cache clearing
+   - wantsKeyRelease property for Kitty protocol key release events
+
+B. RENDERING SYSTEM
+   - Differential Rendering: Only updates changed regions
+   - CSI 2026 Synchronized Output: Atomic screen updates (no flicker)
+   - Debounced Rendering: Batches multiple render requests
+   - Hardware Cursor Positioning: For IME (Input Method Editor) support
+   - CURSOR_MARKER mechanism: Enables CJK input at correct position
+
+C. TERMINAL ABSTRACTION
+   - Terminal interface: Minimal abstraction with columns/rows
+   - ProcessTerminal: Default implementation using stdin/stdout
+   - Kitty Protocol Detection: Auto-detects advanced keyboard protocol
+   - Raw Mode Handling: Manages terminal capabilities
+
+D. FOCUS & KEYBOARD MANAGEMENT
+   - Focusable interface: For components requiring text cursor
+   - Keyboard Input Pipeline: InputListeners → focused component
+   - Key Helper: Typed key identifiers with autocomplete
+   - Keybindings System: Global registry of keyboard shortcuts
+   - Emacs-style editing: Built into Editor/Input components
+
+E. OVERLAY SYSTEM
+   - Overlays: Components rendered on top of normal content
+   - Overlay Stacking: Topmost overlay gets focus
+   - Overlay Positioning: Anchor-based or percentage-based
+   - Responsive Overlays: Show/hide based on terminal dimensions
+   - Overlay Compositing: Single-pass line merging
+
+================================================================================
+3. BUILT-IN COMPONENTS (11 TOTAL)
+================================================================================
+
+DISPLAY COMPONENTS:
+  1. Text
+     - Multi-line text with word wrapping
+     - Optional padding (X, Y)
+     - Optional background color function
+     - Methods: setText(), setCustomBgFn()
+
+  2. TruncatedText
+     - Text with ellipsis when too wide
+     - Customizable ellipsis string
+     - Padding support
+
+  3. Box
+     - Container with padding and background
+     - Applies styling to all child lines
+     - Methods: addChild(), removeChild(), clear(), setBgFn()
+
+  4. Spacer
+     - Empty lines for vertical spacing
+     - Customizable line count (default: 1)
+
+INPUT COMPONENTS:
+  5. Input
+     - Single-line text input
+     - Horizontal scrolling
+     - Emacs-style keyboard shortcuts
+     - Focusable interface (IME support)
+     - Kill ring (clipboard cycling)
+     - Undo stack
+     - Methods: getValue(), setValue()
+     - Callbacks: onSubmit, onEscape
+
+  6. Editor
+     - Multi-line text editor
+     - Autocomplete support
+     - History navigation (up/down arrows)
+     - Jump mode (Ctrl+] to jump to character)
+     - Bracketed paste mode handling
+     - Paste markers for >10 line pastes
+     - Focusable interface (IME support)
+     - Methods: getText(), getExpandedText(), getLines(), setText(), addToHistory()
+     - Callbacks: onSubmit, onChange
+     - Feature: disableSubmit toggle
+
+SELECTION COMPONENTS:
+  7. SelectList
+     - Interactive list with keyboard navigation
+     - Filtering capability
+     - Customizable layout (column width)
+     - Custom truncation logic
+     - Callbacks: onSelect, onCancel, onSelectionChange
+     - Methods: setFilter(), setSelectedIndex(), getSelectedItem()
+
+RENDERING COMPONENTS:
+  8. Markdown
+     - Renders Markdown to terminal
+     - Supports: headings, bold, italic, strikethrough, underline
+     - Code blocks with optional syntax highlighting
+     - Quotes, lists, tables, horizontal rules
+     - Links with OSC 8 hyperlinks
+     - Default text styling (color, bold, italic, etc.)
+     - Methods: setText()
+
+  9. Image
+     - Inline image rendering
+     - Supports Kitty graphics protocol (best)
+     - Supports iTerm2 inline images (fallback)
+     - Text fallback on unsupported terminals
+     - Auto-detects dimensions from image data
+     - Supports PNG, JPEG, GIF, WebP
+     - Methods: getImageId()
+
+UTILITY COMPONENTS:
+  10. Loader
+      - Animated loading spinner
+      - Customizable frames and interval
+      - Color functions for spinner and message
+      - Methods: start(), stop(), setMessage(), setIndicator()
+
+  11. CancellableLoader
+      - Extends Loader with Escape key handling
+      - AbortSignal for async operations
+      - Properties: signal (AbortSignal), aborted (boolean)
+      - Callbacks: onAbort
+
+ALSO PROVIDED:
+  - SettingsList: Settings panel with value cycling
+  - Container: Basic component container
+  - TruncatedText: Text with ellipsis
+
+================================================================================
+4. KEYBOARD SYSTEM
+================================================================================
+
+KEY IDENTIFIERS:
+  - Special keys: escape, enter, tab, space, backspace, delete, insert
+  - Navigation: up, down, left, right, home, end, pageUp, pageDown
+  - Function keys: f1-f12
+  - Single modifiers: ctrl, alt, shift, super (cmd/win)
+  - Multi-modifiers: ctrl+shift, ctrl+alt, etc.
+
+KEY HELPER API:
+  - Key.escape, Key.enter, Key.tab, Key.space, etc. (special keys)
+  - Key.ctrl("c"), Key.alt("x"), Key.shift("tab") (modifiers)
+  - Key.ctrlShift("p"), Key.ctrlAlt("x") (combined modifiers)
+  - String literals also work: "escape", "ctrl+c", "shift+tab"
+
+KEYBOARD PROTOCOL:
+  - Legacy terminal sequences supported
+  - Kitty keyboard protocol auto-detected (CSI codes)
+  - More accurate key detection with Kitty protocol
+  - Key release events available (wantsKeyRelease flag)
+
+EDITOR SHORTCUTS (Emacs-style):
+  Navigation:
+    - Ctrl+B/F (or Left/Right): Move cursor left/right
+    - Ctrl+A/E: Move to line start/end
+    - Ctrl+]: Enter jump mode (jump to character)
+    - Page Up/Down: Scroll
+    
+  Deletion:
+    - Ctrl+H (or Backspace): Delete character backward
+    - Ctrl+D (or Delete): Delete character forward
+    - Ctrl+U/K: Delete to line start/end
+    - Ctrl+W: Delete word backward
+    - Meta+D: Delete word forward
+    
+  Clipboard:
+    - Ctrl+Y: Yank (paste)
+    - Meta+Y: Yank-pop (cycle through kill ring)
+    
+  History:
+    - Up/Down: Navigate history (when at start/end)
+    - Ctrl+Z: Undo
+
+KEYBINDINGS:
+  - Global registry with tui.* namespace
+  - Customizable via setKeybindings()
+  - Default keybindings for all components
+  - Can be remapped at runtime
+
+================================================================================
+5. STYLING & COLORS
+================================================================================
+
+ANSI ESCAPE SEQUENCES:
+  - Pi-TUI uses standard ANSI codes
+  - Chalk library (v5.6.2) recommended for convenience
+  - Colors: red, green, blue, yellow, cyan, magenta, white, gray
+  - Styles: bold, italic, underline, strikethrough, inverse, dim
+  - True color (24-bit RGB): chalk.rgb(r,g,b) or chalk.hex("#RRGGBB")
+  - Background colors: chalk.bgRed, chalk.bgGreen, etc.
+
+THEME SYSTEM:
+  - EditorTheme: borderColor, selectList theme
+  - SelectListTheme: selectedPrefix, selectedText, description, scrollInfo, noMatch
+  - MarkdownTheme: heading, link, code, quote, bold, italic, etc.
+  - ImageTheme: fallbackColor
+  - All theme functions receive text, return styled text
+
+TEXT STYLING RULES:
+  - Styles reset at end of each line
+  - ANSI codes don't count toward width
+  - Reapply styles on each wrapped line
+  - Use utilities to handle ANSI codes correctly
+
+================================================================================
+6. UTILITY FUNCTIONS & HELPERS
+================================================================================
+
+TEXT LAYOUT UTILITIES:
+  - visibleWidth(text): Calculate visible column width (ignores ANSI)
+  - truncateToWidth(text, width, ellipsis, pad): Truncate with ellipsis
+  - wrapTextWithAnsi(text, width): Word-wrap preserving ANSI codes
+  - sliceByColumn(text, startCol, length): Extract column range
+  - sliceWithWidth(line, startCol, length): Slice + return actual width
+  - extractSegments(line, ...): Extract before/after for compositing
+  - isWhitespaceChar(char): Check whitespace
+  - isPunctuationChar(char): Check punctuation
+  - normalizeTerminalOutput(text): Normalize output
+  - applyBackgroundToLine(line, width, bgFn): Apply background to full width
+
+IMAGE UTILITIES:
+  - allocateImageId(): Generate random Kitty image ID
+  - encodeKitty(base64, options): Kitty graphics protocol sequence
+  - encodeITerm2(base64, options): iTerm2 inline image sequence
+  - deleteKittyImage(imageId): Delete specific Kitty image
+  - deleteAllKittyImages(): Delete all Kitty images
+  - getImageDimensions(base64, mimeType): Auto-detect dimensions
+  - getPngDimensions(base64): PNG dimension extraction
+  - getJpegDimensions(base64): JPEG dimension extraction
+  - getGifDimensions(base64): GIF dimension extraction
+  - getWebpDimensions(base64): WebP dimension extraction
+  - calculateImageRows(dims, targetWidth): Calculate required rows
+  - calculateImageCellSize(dims, maxWidth, maxHeight): Calculate cell size
+  - renderImage(base64, dims, options): Render image with options
+  - hyperlink(text, url): OSC 8 hyperlink wrapping
+  - imageFallback(mimeType, dims, filename): Fallback text placeholder
+
+TERMINAL CAPABILITIES:
+  - detectCapabilities(): Auto-detect terminal features
+  - getCapabilities(): Get cached capabilities
+  - setCapabilities(caps): Override capabilities (testing)
+  - resetCapabilitiesCache(): Clear cached capabilities
+  - getCellDimensions(): Get terminal cell pixel dimensions
+  - setCellDimensions(dims): Set cell dimensions
+
+FUZZY MATCHING:
+  - fuzzyMatch(text, pattern): Fuzzy match algorithm
+  - fuzzyFilter(items, pattern): Filter items by fuzzy match
+
+KEY PARSING:
+  - parseKey(data): Parse raw input to key identifier
+  - matchesKey(data, keyId): Check if input matches key
+  - isKeyRelease(data): Check if Kitty key release
+  - isKeyRepeat(data): Check if Kitty key repeat
+  - setKittyProtocolActive(active): Set Kitty protocol state
+  - isKittyProtocolActive(): Query Kitty protocol state
+  - decodeKittyPrintable(text): Decode Kitty printable escape sequences
+
+================================================================================
+7. TERMINAL SUPPORT & CAPABILITIES
+================================================================================
+
+SUPPORTED TERMINALS:
+  ✅ Kitty (full support including graphics and protocol)
+  ✅ Ghostty (graphics and protocol support)
+  ✅ WezTerm (graphics and protocol support)
+  ✅ iTerm2 (inline image support)
+  ✅ xterm-256color (color support)
+  ✅ Linux console (basic support)
+  ✅ VSCode terminal (hyperlinks)
+
+FEATURE DETECTION:
+  - True color (24-bit RGB): Auto-detected
+  - Kitty graphics protocol: Auto-detected
+  - iTerm2 inline images: Fallback if Kitty unavailable
+  - Kitty keyboard protocol: Auto-detected
+  - OSC 8 hyperlinks: Supported in modern terminals
+
+IMAGE PROTOCOLS:
+  1. Kitty Graphics (best): Animations, ID reuse, efficient
+  2. iTerm2 Inline: Fallback, older terminal support
+  3. Text Fallback: When no graphics support available
+
+================================================================================
+8. ADVANCED FEATURES
+================================================================================
+
+A. IME (INPUT METHOD EDITOR) SUPPORT
+   - Hardware cursor positioning for CJK input
+   - CURSOR_MARKER emission in render()
+   - Focusable interface implementation
+   - Works with Chinese, Japanese, Korean input methods
+   - Enables candidate window positioning
+
+B. BRACKETED PASTE MODE
+   - Handles large pastes correctly
+   - Paste markers for pastes >10 lines
+   - Expands markers when needed
+   - Supports kill ring cycling with Meta+Y
+
+C. AUTOCOMPLETE
+   - CombinedAutocompleteProvider: Slash commands + file paths
+   - File path completion: ~/, ./, ../, @ prefix support
+   - Slash command suggestions
+   - Debounced autocomplete requests
+   - Visual SelectList dropdown
+
+D. OVERLAY SYSTEM
+   - Multiple overlays supported
+   - Stacking (z-order) management
+   - Focus capture/non-capturing modes
+   - Responsive visibility (conditional display)
+   - Smooth focus transitions
+
+E. RENDER OPTIMIZATION
+   - Differential rendering (only changed lines)
+   - CSI 2026 synchronized output (atomic)
+   - Debounced render requests
+   - Configurable min render interval
+   - Performance monitoring (fullRedraws counter)
+
+F. MARKDOWN RENDERING
+   - Full Markdown support
+   - Syntax highlighting hooks
+   - Table support with word wrapping
+   - Proper nesting (lists, quotes)
+   - Link detection and OSC 8 hyperlinks
+
+================================================================================
+9. WEECHAT CLI INTEGRATION
+================================================================================
+
+The WeChat TUI uses pi-tui as follows:
+
+ARCHITECTURE:
+  - WorkbenchTerminalRenderer: Terminal abstraction layer
+  - TUI: Main render engine
+  - WechatApp: Root component (screen router)
+  - Screen components: LoginScreen, ConversationScreen, ChatScreen, etc.
+  - Specialized components: Header, StatusBar, MessageList, ChatEditor
+
+COMPONENTS USED:
+  - Text: Display headers, status bars, messages
+  - Editor: Chat input with autocomplete
+  - SelectList: Conversation selection
+  - Custom components: MessageList, ConversationPicker, Header
+
+THEMING:
+  - EditorTheme: Border colors, autocomplete styling
+  - SelectListTheme: Selection highlighting, filtering
+  - Chalk: Color application (inverse, dim, red, etc.)
+
+KEYBOARD HANDLING:
+  - Global input listeners for Ctrl+C, navigation keys
+  - Focus management for chat editor
+  - Command routing (/contacts, /chats, etc.)
+
+STATE MANAGEMENT:
+  - RenderState: Central state object
+  - setState(): Update entire state
+  - requestRender(): Trigger re-render
+  - View routing: login, chats, chat, search
+
+================================================================================
+10. DOCUMENTATION FILES CREATED
+================================================================================
+
+Three comprehensive documentation files have been created in docs/:
+
+1. PI-TUI-GUIDE.md (1007 lines, 26 KB)
+   - Complete API reference
+   - All components with examples
+   - Keyboard shortcuts
+   - Styling guide
+   - Utility functions
+   - Real-world WeChat TUI example
+   - Performance considerations
+   - Terminal support details
+
+2. PI-TUI-QUICK-REFERENCE.md (420 lines, 9.8 KB)
+   - Cheat sheet format
+   - Quick component lookup
+   - Common patterns
+   - Keyboard shortcuts
+   - Theming templates
+   - Troubleshooting guide
+
+3. PI-TUI-ARCHITECTURE.md (476 lines, 11 KB)
+   - System architecture diagrams
+   - Component patterns (5 patterns shown)
+   - Rendering pipeline
+   - Focus management flow
+   - WeChat TUI structure
+   - Performance strategies
+   - Best practices
+   - Testing patterns
+
+================================================================================
+11. KEY FINDINGS & INSIGHTS
+================================================================================
+
+DESIGN PHILOSOPHY:
+  - Minimal core interface (Component with render/handleInput/invalidate)
+  - Composable components (no inheritance-heavy hierarchies)
+  - Efficient rendering (differential updates only)
+  - Terminal abstraction (easy to test, adapt)
+
+STRENGTHS:
+  ✅ Simple, elegant Component interface
+  ✅ Differential rendering prevents flicker
+  ✅ Full keyboard protocol support including IME
+  ✅ Rich set of built-in components
+  ✅ Flexible overlay system
+  ✅ Autocomplete and history built-in (Editor)
+  ✅ Image support (Kitty/iTerm2)
+  ✅ Markdown rendering with syntax highlighting hooks
+  ✅ Emacs-style keyboard shortcuts
+  ✅ Theme system for customization
+
+BEST FOR:
+  - Interactive CLI applications
+  - Chat/messaging interfaces
+  - File selection dialogs
+  - Status dashboards
+  - Form-based UIs
+  - Multi-screen applications
+
+CONSIDERATIONS:
+  - Must respect width parameter in render()
+  - ANSI codes don't count toward width
+  - Styles reset at end of line (reapply per line)
+  - Focus state changes dynamically
+  - Performance depends on caching/invalidation
+
+PERFECT FOR WEECHAT CLI:
+  - Component-based screens (LoginScreen, ChatScreen, etc.)
+  - Keyboard-driven navigation
+  - Message rendering with styling
+  - Chat input with history
+  - Contact/conversation selection (SelectList)
+  - Terminal-agnostic rendering
+
+================================================================================
+12. QUICK START TEMPLATE
+================================================================================
+
+import { TUI, ProcessTerminal, Text, Editor, Key, matchesKey } from "@earendil-works/pi-tui";
+import chalk from "chalk";
+
+// Setup
+const terminal = new ProcessTerminal();
+const tui = new TUI(terminal);
+
+// Create components
+const editor = new Editor(tui, {
+  borderColor: (s) => chalk.dim(s),
+  selectList: {
+    selectedPrefix: (s) => chalk.inverse(s),
+    selectedText: (s) => chalk.inverse(s),
+    description: (s) => chalk.dim(s),
+    scrollInfo: (s) => chalk.dim(s),
+    noMatch: (s) => chalk.dim(s)
+  }
+});
+
+editor.onSubmit = (text) => {
+  console.log("Submitted:", text);
+};
+
+tui.addChild(editor);
+tui.setFocus(editor);
+
+// Handle input
+tui.addInputListener((data) => {
+  if (matchesKey(data, Key.ctrl("c"))) {
+    tui.stop();
+    process.exit(0);
+  }
+  return undefined;
+});
+
+tui.start();
+
+================================================================================
+13. REFERENCED RESOURCES
+================================================================================
+
+- GitHub: https://github.com/earendil-works/pi-mono
+- NPM: https://www.npmjs.com/package/@earendil-works/pi-tui
+- Types: node_modules/@earendil-works/pi-tui/dist/*.d.ts
+- README: node_modules/@earendil-works/pi-tui/README.md
+
+================================================================================
+CONCLUSION
+================================================================================
+
+Pi-TUI is a sophisticated yet elegant Terminal UI framework that provides:
+- Minimal but complete Component API
+- Efficient differential rendering
+- Rich built-in components
+- Full keyboard and IME support
+- Image rendering capabilities
+- Markdown support
+- Theme customization
+
+It's well-suited for building the WeChat TUI with clear separation of concerns,
+efficient rendering, and excellent keyboard-driven UI experience.
+
+All aspects have been documented in three comprehensive guides in docs/:
+- PI-TUI-GUIDE.md (comprehensive reference)
+- PI-TUI-QUICK-REFERENCE.md (quick lookup)
+- PI-TUI-ARCHITECTURE.md (design patterns)
+
+================================================================================
