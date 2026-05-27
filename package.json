@@ -8,7 +8,7 @@
     "README.md"
   ],
   "bin": {
-    "wechat-tui": "./dist/index.js"
+    "wechat-tui": "dist/index.js"
   },
   "scripts": {
     "build": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && tsc -p tsconfig.json",

@@ -59,13 +59,7 @@ jobs:
           fi
 
       - name: Publish to npm
-        run: |
-          PACKAGE_NAME=$(node -p "require('./package.json').name")
-          ACCESS_ARGS=()
-          if [[ "${PACKAGE_NAME}" == @*/* ]]; then
-            ACCESS_ARGS=(--access public)
-          fi
-          npm publish --provenance --tag "${{ steps.npm-tag.outputs.tag }}" "${ACCESS_ARGS[@]}"
+        run: npm publish --provenance --access public --tag "${{ steps.npm-tag.outputs.tag }}"
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
