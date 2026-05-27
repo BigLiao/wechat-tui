@@ -7,12 +7,10 @@
 需要 Node.js `>=22.19.0`。
 
 ```bash
-npm install
-npm run build
-npm link
+npm install -g wechat-tui
 ```
 
-## 启动
+## 使用
 
 ```bash
 wechat-tui
@@ -52,6 +50,14 @@ wechat-tui --debug
 
 ```bash
 wechat-tui --mock
+```
+
+## 本地开发
+
+```bash
+npm install
+npm run build
+npm link
 ```
 
 ## 快捷键
