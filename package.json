@@ -3,6 +3,10 @@
   "version": "0.1.0",
   "description": "A terminal client for WeChat.",
   "type": "module",
+  "files": [
+    "dist",
+    "README.md"
+  ],
   "bin": {
     "wechat-tui": "./dist/index.js"
   },
