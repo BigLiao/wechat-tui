@@ -1,4 +1,4 @@
-import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { CURSOR_MARKER, truncateToWidth } from "@earendil-works/pi-tui";
 import { SYM, theme, fit, clamp } from "../theme.js";
 import type { ContactRecord, RenderState } from "../../types.js";
 
@@ -10,11 +10,8 @@ export class ContactPicker {
     const lines: string[] = [];
 
     // Search prompt
-    const query = state.searchKeyword;
-    const prompt = query
-      ? `  ${theme.dim("search")} ${theme.accent("▸")} ${query}`
-      : `  ${theme.dim("type to search contacts…")}`;
-    lines.push(fit(prompt, width));
+    const promptPrefix = `  ${theme.dim("search")} ${theme.accent(SYM.arrow)} `;
+    lines.push(`${fit(`${promptPrefix}${state.searchKeyword}`, Math.max(1, width - 1))}${CURSOR_MARKER}`);
     lines.push("");
 
     const maxVisible = clamp(rows - 8, 3, 12);

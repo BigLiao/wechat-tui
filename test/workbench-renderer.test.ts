@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { CURSOR_MARKER } from "@earendil-works/pi-tui";
 import { renderState } from "../src/ui/workbench-renderer.js";
 import { MessageList } from "../src/tui/components/message-list.js";
 import type { RenderState } from "../src/types.js";
@@ -232,6 +233,27 @@ describe("WorkbenchTerminalRenderer", () => {
     expect(plain).toContain("Group member");
     expect(plain).toContain("[sticker]");
     expect(plain).not.toContain("@0f2e2a0d4003e6a22454e192b282b96a");
+  });
+
+  it("anchors the search prompt cursor for IME input", () => {
+    const output = renderState(
+      baseState({
+        view: "search",
+        searchKeyword: "一号",
+        searchResults: [
+          {
+            id: "contact:one",
+            protocolId: "@one",
+            kind: "private",
+            displayName: "一号测试",
+            isSelf: false,
+            updatedAt: 1_700_000_000_000
+          }
+        ]
+      })
+    );
+
+    expect(output).toContain(`search ▸ 一号${CURSOR_MARKER}`);
   });
 
   it("renders older message list content when the chat scroll offset is above the bottom", () => {
