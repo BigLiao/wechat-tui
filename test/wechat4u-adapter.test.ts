@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { normalizeWechat4uMessage } from "../src/protocol/wechat4u-adapter.js";
+import { isRecoverableWechat4uError, normalizeWechat4uMessage } from "../src/protocol/wechat4u-adapter.js";
 
 const bot = {
   user: {
@@ -406,5 +406,28 @@ describe("normalizeWechat4uMessage", () => {
     expect(message?.type).toBe("sticker");
     expect(message?.sender.displayName).toBe("贴纸达人");
     expect(message?.content).toBe("[sticker]");
+  });
+});
+
+describe("isRecoverableWechat4uError", () => {
+  it("treats batch contact timeouts as recoverable", () => {
+    const error = Object.assign(new Error("timeout of 60000ms exceeded"), {
+      code: "ECONNABORTED",
+      tips: "批量获取联系人失败",
+      config: {
+        url: "https://wx2.qq.com/cgi-bin/mmwebwx-bin/webwxbatchgetcontact?pass_ticket=secret"
+      }
+    });
+
+    expect(isRecoverableWechat4uError(error)).toBe(true);
+  });
+
+  it("does not treat unrelated protocol errors as recoverable", () => {
+    const error = Object.assign(new Error("login failed"), {
+      code: "AUTH_FAILED",
+      tips: "登录失败"
+    });
+
+    expect(isRecoverableWechat4uError(error)).toBe(false);
   });
 });

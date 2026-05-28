@@ -341,9 +341,18 @@ export class Wechat4uAdapter extends EventEmitter implements WeChatProtocol {
 
     bot.on("error", (error: unknown) => {
       const normalizedError = error instanceof Error ? error : new Error(String(error));
-      this.options.logger?.error({ err: normalizedError }, "wechat4u error");
+      const errorSummary = summarizeWechat4uError(normalizedError);
+      if (isRecoverableWechat4uError(normalizedError)) {
+        this.options.logger?.warn({ error: errorSummary }, "wechat4u recoverable error");
+        if (isLoggedIn(bot)) {
+          this.emit("state", "online" satisfies ConnectionState);
+        }
+        return;
+      }
+
+      this.options.logger?.error({ error: errorSummary }, "wechat4u error");
       this.emit("state", "error" satisfies ConnectionState);
-      this.emit("error", normalizedError);
+      this.emit("error", toProtocolError(normalizedError));
     });
   }
 
@@ -990,6 +999,86 @@ function extractSentMessageId(raw: unknown): string | undefined {
   }
   const value = raw as { MsgID?: unknown; MsgId?: unknown; NewMsgId?: unknown };
   return value.MsgID ? String(value.MsgID) : value.MsgId ? String(value.MsgId) : value.NewMsgId ? String(value.NewMsgId) : undefined;
+}
+
+export function isRecoverableWechat4uError(error: unknown): boolean {
+  const code = getStringProperty(error, "code");
+  const message = error instanceof Error ? error.message : String(error);
+  const tips = getStringProperty(error, "tips");
+  const url = getNestedStringProperty(error, ["config", "url"]) ?? getNestedStringProperty(error, ["request", "_currentUrl"]);
+  const responseStatus = getNestedNumberProperty(error, ["response", "status"]);
+
+  const isBatchContactFailure =
+    tips.includes("批量获取联系人失败") || (url !== undefined && url.includes("/webwxbatchgetcontact"));
+  const isTransientNetworkFailure =
+    ["ETIMEDOUT", "ECONNABORTED", "ECONNRESET", "EAI_AGAIN", "ENETUNREACH"].includes(code) ||
+    /timeout|timed out|socket hang up|network/i.test(message) ||
+    (responseStatus !== undefined && responseStatus >= 500);
+
+  return isBatchContactFailure && isTransientNetworkFailure;
+}
+
+function summarizeWechat4uError(error: Error): Record<string, unknown> {
+  const url = getNestedStringProperty(error, ["config", "url"]) ?? getNestedStringProperty(error, ["request", "_currentUrl"]);
+  return {
+    name: error.name,
+    message: error.message,
+    code: getStringProperty(error, "code"),
+    type: getStringProperty(error, "type"),
+    tips: getStringProperty(error, "tips"),
+    status: getNestedNumberProperty(error, ["response", "status"]),
+    url: stripQuery(url),
+    stack: preview(error.stack, 2_000)
+  };
+}
+
+function toProtocolError(error: Error): Error {
+  const tips = getStringProperty(error, "tips");
+  const code = getStringProperty(error, "code");
+  const message = tips || error.message || code || "WeChat protocol error";
+  const protocolError = new Error(message);
+  protocolError.name = error.name;
+  if (code) {
+    Object.defineProperty(protocolError, "code", {
+      value: code,
+      enumerable: true,
+      configurable: true
+    });
+  }
+  return protocolError;
+}
+
+function getStringProperty(value: unknown, key: string): string {
+  if (!value || typeof value !== "object") {
+    return "";
+  }
+  const property = (value as Record<string, unknown>)[key];
+  return typeof property === "string" ? property : "";
+}
+
+function getNestedStringProperty(value: unknown, path: string[]): string | undefined {
+  const property = getNestedProperty(value, path);
+  return typeof property === "string" ? property : undefined;
+}
+
+function getNestedNumberProperty(value: unknown, path: string[]): number | undefined {
+  const property = getNestedProperty(value, path);
+  return typeof property === "number" ? property : undefined;
+}
+
+function getNestedProperty(value: unknown, path: string[]): unknown {
+  let current = value;
+  for (const key of path) {
+    if (!current || typeof current !== "object") {
+      return undefined;
+    }
+    current = (current as Record<string, unknown>)[key];
+  }
+  return current;
+}
+
+function stripQuery(url: string | undefined): string | undefined {
+  return url?.replace(/[?#].*$/, "");
 }
 
 function isLoggedIn(bot: RawWechatBot): boolean {
