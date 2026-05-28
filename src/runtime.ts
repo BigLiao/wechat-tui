@@ -548,24 +548,52 @@ export class WeChatRuntime extends EventEmitter {
       return;
     }
     const contact = results[clamp(this.selectedSearchIndex, 0, results.length - 1)];
-    const conversation = this.store.upsertConversation(this.conversationFromStoredContact(contact));
+    const conversation = this.mergeConversationWithContact(
+      contact,
+      this.store.upsertConversation(this.conversationFromStoredContact(contact))
+    );
     this.openConversation(conversation);
   }
 
   private openConversation(conversation: ConversationRecord): void {
-    this.activeConversationId = conversation.id;
+    const currentConversation = this.mergeConversationWithCurrentContact(conversation);
+    this.activeConversationId = currentConversation.id;
     this.view = "chat";
     this.previousView = "chats";
     this.conversationQuery = "";
     this.searchKeyword = "";
     this.chatInput = "";
     this.messageScrollOffset = 0;
-    this.store.markRead(conversation.id);
-    this.statusMessage = `opened ${conversation.title}`;
+    this.store.markRead(currentConversation.id);
+    this.statusMessage = `opened ${currentConversation.title}`;
     this.options.logger?.info(
-      { conversationId: conversation.id, title: conversation.title, kind: conversation.kind },
+      { conversationId: currentConversation.id, title: currentConversation.title, kind: currentConversation.kind },
       "opened conversation"
     );
+  }
+
+  private mergeConversationWithCurrentContact(conversation: ConversationRecord): ConversationRecord {
+    const contact = this.currentContactForConversation(conversation);
+    return contact ? this.mergeConversationWithContact(contact, conversation) : conversation;
+  }
+
+  private mergeConversationWithContact(contact: ContactRecord, conversation: ConversationRecord): ConversationRecord {
+    const currentConversation =
+      conversation.id === this.conversationFromStoredContact(contact).id
+        ? conversation
+        : this.store.upsertConversation(this.conversationFromStoredContact(contact));
+    return this.store.mergeStaleConversationForContact(contact, currentConversation);
+  }
+
+  private currentContactForConversation(conversation: ConversationRecord): ContactRecord | undefined {
+    if (conversation.kind !== "private") {
+      return undefined;
+    }
+    const contact = this.store.findContactByName(conversation.title);
+    if (!contact || contact.kind !== conversation.kind || !contactMatchesConversationTitle(contact, conversation)) {
+      return undefined;
+    }
+    return contact;
   }
 
   private enterContactSearch(previousView: AppView): void {
@@ -617,11 +645,13 @@ export class WeChatRuntime extends EventEmitter {
   }
 
   private async sendToActiveConversation(text: string): Promise<void> {
-    const activeConversation = this.getActiveConversation();
+    let activeConversation = this.getActiveConversation();
     if (!activeConversation) {
       this.errorMessage = "no active conversation";
       return;
     }
+    activeConversation = this.mergeConversationWithCurrentContact(activeConversation);
+    this.activeConversationId = activeConversation.id;
     // Resolve the current protocol ID: prefer a fresh lookup from active contacts
     const protocolId = this.resolveCurrentProtocolId(activeConversation);
     if (!protocolId) {
@@ -674,11 +704,13 @@ export class WeChatRuntime extends EventEmitter {
       this.errorMessage = "usage: /send <file-path>";
       return;
     }
-    const activeConversation = this.getActiveConversation();
+    let activeConversation = this.getActiveConversation();
     if (!activeConversation) {
       this.errorMessage = "no active conversation";
       return;
     }
+    activeConversation = this.mergeConversationWithCurrentContact(activeConversation);
+    this.activeConversationId = activeConversation.id;
     const protocolId = this.resolveCurrentProtocolId(activeConversation);
     if (!protocolId) {
       this.errorMessage = "active conversation has no current protocol id";
@@ -732,7 +764,7 @@ export class WeChatRuntime extends EventEmitter {
 
   private handleIncomingMessage(incoming: IncomingProtocolMessage): void {
     const scopedIncoming = this.scopeIncomingMessage(incoming);
-    this.store.upsertContact(this.contactFromConversationInput(scopedIncoming.conversation));
+    let conversationContact = this.store.upsertContact(this.contactFromConversationInput(scopedIncoming.conversation));
     const senderIsGroupConversation =
       scopedIncoming.conversation.kind === "group" &&
       !!scopedIncoming.sender.protocolId &&
@@ -741,9 +773,19 @@ export class WeChatRuntime extends EventEmitter {
       !senderIsGroupConversation &&
       (scopedIncoming.sender.id !== scopedIncoming.conversation.id || scopedIncoming.conversation.kind !== "group")
     ) {
-      this.store.upsertContact(scopedIncoming.sender);
+      const senderContact = this.store.upsertContact(scopedIncoming.sender);
+      if (
+        scopedIncoming.conversation.kind === "private" &&
+        !!scopedIncoming.sender.protocolId &&
+        scopedIncoming.sender.protocolId === scopedIncoming.conversation.protocolId
+      ) {
+        conversationContact = senderContact;
+      }
     }
-    const isActive = this.activeConversationId === scopedIncoming.conversation.id;
+    const activeConversation = this.getActiveConversation();
+    const isActive =
+      this.activeConversationId === scopedIncoming.conversation.id ||
+      !!activeConversationMatchesInput(activeConversation, scopedIncoming.conversation);
     const isPublic = scopedIncoming.conversation.kind === "public";
     const incrementUnread = !isPublic && !scopedIncoming.isSelf && !isActive;
     const saved = this.store.saveMessage(
@@ -762,11 +804,17 @@ export class WeChatRuntime extends EventEmitter {
       scopedIncoming.conversation,
       incrementUnread
     );
+    const savedConversation = this.store.findConversationById(scopedIncoming.conversation.id);
+    const mergedConversation =
+      savedConversation && !isPublic ? this.store.mergeStaleConversationForContact(conversationContact, savedConversation) : savedConversation;
+    if (isActive && mergedConversation) {
+      this.activeConversationId = mergedConversation.id;
+    }
 
     if (isPublic) {
       // Public account updates should be archived without creating unread or status reminders.
     } else if (isActive) {
-      this.store.markRead(scopedIncoming.conversation.id);
+      this.store.markRead(mergedConversation?.id ?? scopedIncoming.conversation.id);
       this.statusMessage = "new message";
     } else if (this.view === "chat" || this.view === "search") {
       this.statusMessage = `new message from ${scopedIncoming.conversation.title}`;
@@ -920,22 +968,7 @@ export class WeChatRuntime extends EventEmitter {
    * We look up by title (displayName) in active contacts to find the fresh one.
    */
   private resolveCurrentProtocolId(conversation: ConversationRecord): string | undefined {
-    // First try: find a non-stale contact with the same display name
-    const contact = this.store.findContactByName(conversation.title);
-    if (contact?.protocolId) {
-      // Update the conversation's protocolId for future use
-      if (contact.protocolId !== conversation.protocolId) {
-        this.store.upsertConversation({
-          id: conversation.id,
-          protocolId: contact.protocolId,
-          kind: conversation.kind,
-          title: conversation.title
-        });
-      }
-      return contact.protocolId;
-    }
-    // Fallback: use the stored protocolId (may be stale but worth trying)
-    return conversation.protocolId;
+    return this.currentContactForConversation(conversation)?.protocolId ?? conversation.protocolId;
   }
 
   private startUpdateCheck(): void {
@@ -1110,6 +1143,28 @@ function conversationInputFromRecord(record: ConversationRecord): ConversationIn
     kind: record.kind,
     title: record.title
   };
+}
+
+function activeConversationMatchesInput(
+  activeConversation: ConversationRecord | undefined,
+  incomingConversation: ConversationInput
+): boolean {
+  return (
+    !!activeConversation &&
+    activeConversation.kind === incomingConversation.kind &&
+    normalizedConversationName(activeConversation.title) === normalizedConversationName(incomingConversation.title)
+  );
+}
+
+function contactMatchesConversationTitle(contact: ContactRecord, conversation: ConversationRecord): boolean {
+  const title = normalizedConversationName(conversation.title);
+  return [contact.displayName, contact.remarkName, contact.nickName, contact.alias].some(
+    (value) => normalizedConversationName(value) === title
+  );
+}
+
+function normalizedConversationName(value: string | undefined): string {
+  return (value ?? "").normalize("NFKC").trim().toLowerCase().replace(/\s+/g, " ");
 }
 
 function foldPublicConversations(conversations: ConversationRecord[]): ConversationRecord[] {

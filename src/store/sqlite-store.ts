@@ -396,6 +396,46 @@ export class SqliteStore implements MessageStore {
     return saved;
   }
 
+  mergeStaleConversationForContact(contact: ContactRecord, conversation: ConversationRecord): ConversationRecord {
+    const accountId = this.currentAccountId();
+    if (!accountId || contact.kind !== "private" || contact.isSelf) {
+      return conversation;
+    }
+
+    const activeMatches = this.findLazyMergeActiveContacts(accountId, contact);
+    if (activeMatches.length !== 1 || activeMatches[0]?.id !== contact.id) {
+      this.options.logger?.debug(
+        { contactId: contact.id, displayName: contact.displayName, activeMatches: activeMatches.length },
+        "skipping stale conversation merge because current contact is ambiguous"
+      );
+      return conversation;
+    }
+
+    const staleContacts = this.findLazyMergeStaleContacts(accountId, contact);
+    if (staleContacts.length === 0) {
+      return conversation;
+    }
+
+    const staleConversations = this.findLazyMergeStaleConversations(accountId, contact, conversation, staleContacts);
+    if (staleConversations.length === 0) {
+      return conversation;
+    }
+
+    this.applyStaleConversationMerge(accountId, contact, conversation, staleContacts, staleConversations);
+
+    const merged = this.findConversationById(conversation.id) ?? conversation;
+    this.options.logger?.info(
+      {
+        contactId: contact.id,
+        conversationId: conversation.id,
+        staleContactIds: staleContacts.map((staleContact) => staleContact.id),
+        staleConversationIds: staleConversations.map((staleConversation) => staleConversation.id)
+      },
+      "merged stale conversations into current contact conversation"
+    );
+    return merged;
+  }
+
   findConversationById(id: string): ConversationRecord | undefined {
     const accountId = this.currentAccountId();
     if (!accountId) {
@@ -406,27 +446,6 @@ export class SqliteStore implements MessageStore {
       | undefined;
     const conversation = row ? asConversation(row) : undefined;
     this.options.logger?.trace({ id, found: !!conversation }, "conversation lookup by id");
-    return conversation;
-  }
-
-  findConversationByName(query: string): ConversationRecord | undefined {
-    const accountId = this.currentAccountId();
-    if (!accountId) {
-      return undefined;
-    }
-    const normalized = query.trim().toLowerCase();
-    if (!normalized) {
-      return undefined;
-    }
-    const like = `%${normalized}%`;
-    const row = this.db
-      .prepare(
-        "SELECT * FROM conversations WHERE account_id = ? AND (lower(title) = ? OR lower(title) LIKE ?) " +
-          "ORDER BY CASE WHEN lower(title) = ? THEN 0 ELSE 1 END, updated_at DESC LIMIT 1"
-      )
-      .get(accountId, normalized, like, normalized) as ConversationRow | undefined;
-    const conversation = row ? asConversation(row) : undefined;
-    this.options.logger?.debug({ query, found: !!conversation, conversationId: conversation?.id }, "conversation lookup by name");
     return conversation;
   }
 
@@ -527,7 +546,10 @@ export class SqliteStore implements MessageStore {
         "SELECT * FROM conversations WHERE account_id = ? ORDER BY last_message_at IS NULL ASC, last_message_at DESC, updated_at DESC LIMIT ?"
       )
       .all(accountId, scanLimit) as unknown as ConversationRow[];
-    const conversations = dedupeConversationsByProtocol(rows.map(asConversation)).slice(0, limit);
+    const conversations = this.foldPrivateConversationsByActiveContacts(
+      accountId,
+      dedupeConversationsByProtocol(rows.map(asConversation))
+    ).slice(0, limit);
     this.options.logger?.debug({ limit, count: conversations.length }, "listed recent conversations");
     return conversations;
   }
@@ -544,7 +566,10 @@ export class SqliteStore implements MessageStore {
           "ORDER BY last_message_at DESC, updated_at DESC LIMIT ?"
       )
       .all(accountId, scanLimit) as unknown as ConversationRow[];
-    const conversations = dedupeConversationsByProtocol(rows.map(asConversation)).slice(0, limit);
+    const conversations = this.foldPrivateConversationsByActiveContacts(
+      accountId,
+      dedupeConversationsByProtocol(rows.map(asConversation))
+    ).slice(0, limit);
     this.options.logger?.debug({ limit, count: conversations.length }, "listed unread conversations");
     return conversations;
   }
@@ -730,6 +755,194 @@ export class SqliteStore implements MessageStore {
     }
   }
 
+  private foldPrivateConversationsByActiveContacts(
+    accountId: string,
+    conversations: ConversationRecord[]
+  ): ConversationRecord[] {
+    const activeContacts = this.listActivePrivateContacts(accountId);
+    if (activeContacts.length === 0) {
+      return conversations;
+    }
+
+    const buckets = new Map<string, { contact?: ContactRecord; conversations: ConversationRecord[] }>();
+    for (const conversation of conversations) {
+      const contact = this.uniqueActiveContactForConversation(activeContacts, conversation);
+      const key = contact ? `contact:${contact.id}` : conversation.protocolId ? `${conversation.kind}:${conversation.protocolId}` : conversation.id;
+      const bucket = buckets.get(key);
+      if (bucket) {
+        bucket.conversations.push(conversation);
+      } else {
+        buckets.set(key, { contact, conversations: [conversation] });
+      }
+    }
+
+    return Array.from(buckets.values())
+      .map(({ contact, conversations: bucketConversations }) => foldConversationBucket(contact, bucketConversations))
+      .sort(compareRecentConversations);
+  }
+
+  private listActivePrivateContacts(accountId: string): ContactRecord[] {
+    const rows = this.db
+      .prepare("SELECT * FROM contacts WHERE account_id = ? AND is_self = 0 AND is_stale = 0 AND kind = 'private'")
+      .all(accountId) as unknown as ContactRow[];
+    return rows.map(asContact);
+  }
+
+  private uniqueActiveContactForConversation(
+    activeContacts: ContactRecord[],
+    conversation: ConversationRecord
+  ): ContactRecord | undefined {
+    if (conversation.kind !== "private") {
+      return undefined;
+    }
+    const matches = activeContacts.filter((contact) => contactMatchesConversation(contact, conversation));
+    return matches.length === 1 ? matches[0] : undefined;
+  }
+
+  private findLazyMergeActiveContacts(accountId: string, contact: ContactRecord): ContactRecord[] {
+    const rows = this.db
+      .prepare("SELECT * FROM contacts WHERE account_id = ? AND is_self = 0 AND is_stale = 0 AND kind = ? AND display_name = ?")
+      .all(accountId, contact.kind, contact.displayName) as unknown as ContactRow[];
+    return rows.map(asContact).filter((candidate) => sameLazyMergeContact(candidate, contact));
+  }
+
+  private findLazyMergeStaleContacts(accountId: string, contact: ContactRecord): ContactRecord[] {
+    const rows = this.db
+      .prepare("SELECT * FROM contacts WHERE account_id = ? AND is_self = 0 AND is_stale = 1 AND kind = ? AND display_name = ?")
+      .all(accountId, contact.kind, contact.displayName) as unknown as ContactRow[];
+    return rows
+      .map(asContact)
+      .filter(
+        (candidate) =>
+          candidate.id !== contact.id &&
+          !!candidate.protocolId &&
+          candidate.protocolId !== contact.protocolId &&
+          sameLazyMergeContact(candidate, contact)
+      );
+  }
+
+  private findLazyMergeStaleConversations(
+    accountId: string,
+    contact: ContactRecord,
+    conversation: ConversationRecord,
+    staleContacts: ContactRecord[]
+  ): ConversationRecord[] {
+    const staleConversationById = new Map<string, ConversationRecord>();
+    const statement = this.db.prepare(
+      "SELECT * FROM conversations WHERE account_id = ? AND kind = ? AND protocol_id = ? AND id != ? AND title = ?"
+    );
+
+    for (const staleContact of staleContacts) {
+      if (!staleContact.protocolId) {
+        continue;
+      }
+      const rows = statement.all(
+        accountId,
+        staleContact.kind,
+        staleContact.protocolId,
+        conversation.id,
+        contact.displayName
+      ) as unknown as ConversationRow[];
+      for (const row of rows) {
+        staleConversationById.set(row.id, asConversation(row));
+      }
+    }
+
+    return Array.from(staleConversationById.values());
+  }
+
+  private applyStaleConversationMerge(
+    accountId: string,
+    contact: ContactRecord,
+    conversation: ConversationRecord,
+    staleContacts: ContactRecord[],
+    staleConversations: ConversationRecord[]
+  ): void {
+    const staleUnreadCount = staleConversations.reduce((total, staleConversation) => total + staleConversation.unreadCount, 0);
+    const now = Date.now();
+    this.db.exec("BEGIN");
+    try {
+      for (const staleConversation of staleConversations) {
+        this.db
+          .prepare("UPDATE messages SET conversation_id = ? WHERE account_id = ? AND conversation_id = ?")
+          .run(conversation.id, accountId, staleConversation.id);
+      }
+      for (const staleContact of staleContacts) {
+        this.db
+          .prepare("UPDATE messages SET sender_id = ? WHERE account_id = ? AND conversation_id = ? AND sender_id = ?")
+          .run(contact.id, accountId, conversation.id, staleContact.id);
+      }
+      for (const staleConversation of staleConversations) {
+        this.db.prepare("DELETE FROM conversations WHERE account_id = ? AND id = ?").run(accountId, staleConversation.id);
+      }
+      this.refreshConversationSummary(accountId, conversation, staleUnreadCount, now);
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      this.options.logger?.error(
+        {
+          err: error,
+          contactId: contact.id,
+          conversationId: conversation.id,
+          staleConversationIds: staleConversations.map((staleConversation) => staleConversation.id)
+        },
+        "failed to merge stale conversations"
+      );
+      throw error;
+    }
+  }
+
+  private refreshConversationSummary(
+    accountId: string,
+    conversation: ConversationRecord,
+    unreadIncrement: number,
+    updatedAt: number
+  ): void {
+    const latest = this.db
+      .prepare(
+        "SELECT * FROM messages WHERE account_id = ? AND conversation_id = ? ORDER BY timestamp DESC, created_at DESC LIMIT 1"
+      )
+      .get(accountId, conversation.id) as MessageRow | undefined;
+
+    if (!latest) {
+      this.db
+        .prepare(
+          "UPDATE conversations SET protocol_id = ?, kind = ?, title = ?, unread_count = unread_count + ?, updated_at = ? " +
+            "WHERE account_id = ? AND id = ?"
+        )
+        .run(
+          conversation.protocolId ?? null,
+          conversation.kind,
+          conversation.title,
+          unreadIncrement,
+          updatedAt,
+          accountId,
+          conversation.id
+        );
+      return;
+    }
+
+    this.db
+      .prepare(
+        "UPDATE conversations SET protocol_id = ?, kind = ?, title = ?, unread_count = unread_count + ?, " +
+          "last_message_preview = ?, last_message_sender_name = ?, last_message_is_self = ?, last_message_at = ?, updated_at = ? " +
+          "WHERE account_id = ? AND id = ?"
+      )
+      .run(
+        conversation.protocolId ?? null,
+        conversation.kind,
+        conversation.title,
+        unreadIncrement,
+        latest.content,
+        latest.sender_name,
+        latest.is_self,
+        latest.timestamp,
+        updatedAt,
+        accountId,
+        conversation.id
+      );
+  }
+
   private currentAccountId(): string | undefined {
     return this.activeAccountId;
   }
@@ -852,6 +1065,43 @@ export class SqliteStore implements MessageStore {
 
 function isUsefulSenderName(value: string | undefined): value is string {
   return !!value && value !== "Unknown" && value !== "Group member" && !value.startsWith("@");
+}
+
+function sameLazyMergeContact(left: ContactRecord, right: ContactRecord): boolean {
+  return (
+    left.kind === right.kind &&
+    mergeText(left.displayName) === mergeText(right.displayName) &&
+    mergeText(left.remarkName) === mergeText(right.remarkName) &&
+    mergeText(left.nickName) === mergeText(right.nickName) &&
+    mergeText(left.alias) === mergeText(right.alias)
+  );
+}
+
+function mergeText(value: string | undefined): string {
+  return (value ?? "").normalize("NFKC").trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+function contactMatchesConversation(contact: ContactRecord, conversation: ConversationRecord): boolean {
+  const title = mergeText(conversation.title);
+  return [contact.displayName, contact.remarkName, contact.nickName, contact.alias].some((value) => mergeText(value) === title);
+}
+
+function foldConversationBucket(contact: ContactRecord | undefined, conversations: ConversationRecord[]): ConversationRecord {
+  const sorted = [...conversations].sort(compareRecentConversations);
+  const latest = sorted[0];
+  const current = contact ? conversations.find((conversation) => conversation.protocolId === contact.protocolId) : undefined;
+  const base = current ?? latest;
+  return {
+    ...base,
+    protocolId: current?.protocolId ?? base.protocolId,
+    title: contact?.displayName ?? base.title,
+    unreadCount: conversations.reduce((total, conversation) => total + conversation.unreadCount, 0),
+    lastMessagePreview: latest.lastMessagePreview,
+    lastMessageSenderName: latest.lastMessageSenderName,
+    lastMessageIsSelf: latest.lastMessageIsSelf,
+    lastMessageAt: latest.lastMessageAt,
+    updatedAt: Math.max(...conversations.map((conversation) => conversation.updatedAt))
+  };
 }
 
 function dedupeContactsByProtocol(contacts: ContactRecord[]): ContactRecord[] {

@@ -364,6 +364,136 @@ describe("WeChatRuntime", () => {
     store.close();
   });
 
+  it("opens current contacts from search with stale conversation history merged", async () => {
+    const store = new SqliteStore(tempDb());
+    const protocol = new MockProtocol();
+    const renderer = new FakeRenderer();
+    const staleContact: ContactInput = {
+      id: contactId("private", ["old-boss"]),
+      protocolId: "@old-boss",
+      kind: "private",
+      displayName: "Boss",
+      remarkName: "Boss"
+    };
+    const staleConversation = conversationFromContact(staleContact);
+
+    store.setActiveAccount(protocol.getCurrentUser());
+    store.upsertContact(staleContact);
+    store.saveMessage(
+      {
+        id: localMessageId([staleConversation.id, "old history"]),
+        conversationId: staleConversation.id,
+        senderId: staleContact.id,
+        senderName: "Boss",
+        isSelf: false,
+        content: "old history",
+        type: "text",
+        timestamp: 1_700_000_000_000
+      },
+      staleConversation,
+      true
+    );
+
+    const runtime = new WeChatRuntime(protocol, store, renderer, { initialHistoryLimit: 10 });
+    await runtime.start();
+    await runtime.handleUiEvent({ type: "conversation-open" });
+    await pressText(runtime, "Boss");
+    await runtime.handleKey(key.enter());
+
+    expect(renderer.latest.view).toBe("chat");
+    expect(renderer.latest.activeConversation?.title).toBe("Boss");
+    expect(renderer.latest.activeConversation?.protocolId).toBe("@boss");
+    expect(renderer.latest.messages.map((message) => message.content)).toContain("old history");
+    expect(store.findConversationById(staleConversation.id)).toBeUndefined();
+    store.close();
+  });
+
+  it("opens stale recent conversations through the current contact conversation", async () => {
+    const store = new SqliteStore(tempDb());
+    const protocol = new MockProtocol();
+    const renderer = new FakeRenderer();
+    const staleContact: ContactInput = {
+      id: contactId("private", ["old-boss-list"]),
+      protocolId: "@old-boss-list",
+      kind: "private",
+      displayName: "Boss",
+      remarkName: "Boss"
+    };
+    const staleConversation = conversationFromContact(staleContact);
+
+    store.setActiveAccount(protocol.getCurrentUser());
+    store.upsertContact(staleContact);
+    store.saveMessage(
+      {
+        id: localMessageId([staleConversation.id, "old list history"]),
+        conversationId: staleConversation.id,
+        senderId: staleContact.id,
+        senderName: "Boss",
+        isSelf: false,
+        content: "old list history",
+        type: "text",
+        timestamp: 1_700_000_000_000
+      },
+      staleConversation,
+      true
+    );
+
+    const runtime = new WeChatRuntime(protocol, store, renderer, { initialHistoryLimit: 10 });
+    await runtime.start();
+    await runtime.handleKey(key.enter());
+
+    expect(renderer.latest.view).toBe("chat");
+    expect(renderer.latest.activeConversation?.protocolId).toBe("@boss");
+    expect(renderer.latest.messages.map((message) => message.content)).toContain("old list history");
+    expect(store.findConversationById(staleConversation.id)).toBeUndefined();
+    store.close();
+  });
+
+  it("merges stale conversations when a current contact message arrives", async () => {
+    const store = new SqliteStore(tempDb());
+    const protocol = new MockProtocol();
+    const renderer = new FakeRenderer();
+    const staleContact: ContactInput = {
+      id: contactId("private", ["old-boss-incoming"]),
+      protocolId: "@old-boss-incoming",
+      kind: "private",
+      displayName: "Boss",
+      remarkName: "Boss"
+    };
+    const staleConversation = conversationFromContact(staleContact);
+
+    store.setActiveAccount(protocol.getCurrentUser());
+    store.upsertContact(staleContact);
+    store.saveMessage(
+      {
+        id: localMessageId([staleConversation.id, "old incoming history"]),
+        conversationId: staleConversation.id,
+        senderId: staleContact.id,
+        senderName: "Boss",
+        isSelf: false,
+        content: "old incoming history",
+        type: "text",
+        timestamp: 1_700_000_000_000
+      },
+      staleConversation,
+      true
+    );
+
+    const runtime = new WeChatRuntime(protocol, store, renderer, { initialHistoryLimit: 10 });
+    await runtime.start();
+    protocol.emitIncoming("Boss", "new incoming", 1_700_000_100_000);
+
+    const bossConversations = store.listRecentConversations().filter((conversation) => conversation.title === "Boss");
+    expect(bossConversations).toHaveLength(1);
+    expect(bossConversations[0]?.protocolId).toBe("@boss");
+    expect(store.findConversationById(staleConversation.id)).toBeUndefined();
+    expect(store.listMessages(bossConversations[0]!.id).map((message) => message.content)).toEqual([
+      "old incoming history",
+      "new incoming"
+    ]);
+    store.close();
+  });
+
   it("ignores a duplicate enter immediately after opening contact search", async () => {
     const store = new SqliteStore(tempDb());
     const protocol = new MockProtocol();

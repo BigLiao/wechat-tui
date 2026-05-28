@@ -172,6 +172,118 @@ describe("SqliteStore", () => {
     store.close();
   });
 
+  it("lazily merges stale private conversations into the current contact conversation", () => {
+    const store = new SqliteStore(tempDb());
+    store.setActiveAccount(accountA);
+    const staleContact: ContactInput = {
+      id: contactId("private", ["@old-one"]),
+      protocolId: "@old-one",
+      kind: "private",
+      displayName: "一号测试",
+      remarkName: "一号测试",
+      nickName: "猎魔人"
+    };
+    const currentContact: ContactInput = {
+      ...staleContact,
+      id: contactId("private", ["@new-one"]),
+      protocolId: "@new-one"
+    };
+    const staleConversation = conversationFromContact(staleContact);
+
+    store.upsertContact(staleContact);
+    store.saveMessage(
+      {
+        id: localMessageId([staleConversation.id, "old"]),
+        conversationId: staleConversation.id,
+        senderId: staleContact.id,
+        senderName: "一号测试",
+        isSelf: false,
+        content: "old message",
+        type: "text",
+        timestamp: 1_700_000_000_000
+      },
+      staleConversation,
+      true
+    );
+
+    store.markAllContactsStale();
+    const current = store.upsertContact(currentContact);
+    const currentConversation = store.upsertConversation(conversationFromContact(currentContact));
+    const merged = store.mergeStaleConversationForContact(current, currentConversation);
+
+    expect(merged.id).toBe(currentConversation.id);
+    expect(merged.protocolId).toBe("@new-one");
+    expect(merged.lastMessagePreview).toBe("old message");
+    expect(store.findConversationById(staleConversation.id)).toBeUndefined();
+    expect(store.listRecentConversations().filter((conversation) => conversation.title === "一号测试")).toHaveLength(1);
+    expect(store.listMessages(staleConversation.id)).toHaveLength(0);
+    const messages = store.listMessages(currentConversation.id);
+    expect(messages).toHaveLength(1);
+    expect(messages[0]?.senderId).toBe(current.id);
+    expect(store.totalUnreadCount()).toBe(1);
+    store.close();
+  });
+
+  it("folds stale private conversations in recent and unread lists", () => {
+    const store = new SqliteStore(tempDb());
+    store.setActiveAccount(accountA);
+    const staleContact: ContactInput = {
+      id: contactId("private", ["@old-folded"]),
+      protocolId: "@old-folded",
+      kind: "private",
+      displayName: "Folded Friend",
+      remarkName: "Folded Friend",
+      nickName: "Folded"
+    };
+    const currentContact: ContactInput = {
+      ...staleContact,
+      id: contactId("private", ["@new-folded"]),
+      protocolId: "@new-folded"
+    };
+    const staleConversation = conversationFromContact(staleContact);
+    const currentConversation = conversationFromContact(currentContact);
+
+    store.upsertContact(staleContact);
+    store.saveMessage(
+      {
+        id: localMessageId([staleConversation.id, "old folded"]),
+        conversationId: staleConversation.id,
+        senderId: staleContact.id,
+        senderName: "Folded Friend",
+        isSelf: false,
+        content: "old folded",
+        type: "text",
+        timestamp: 1_700_000_000_000
+      },
+      staleConversation,
+      true
+    );
+    store.markAllContactsStale();
+    store.upsertContact(currentContact);
+    store.saveMessage(
+      {
+        id: localMessageId([currentConversation.id, "new folded"]),
+        conversationId: currentConversation.id,
+        senderId: currentContact.id,
+        senderName: "Folded Friend",
+        isSelf: false,
+        content: "new folded",
+        type: "text",
+        timestamp: 1_700_000_100_000
+      },
+      currentConversation,
+      true
+    );
+
+    const recent = store.listRecentConversations().filter((conversation) => conversation.title === "Folded Friend");
+    expect(recent).toHaveLength(1);
+    expect(recent[0]?.id).toBe(currentConversation.id);
+    expect(recent[0]?.unreadCount).toBe(2);
+    expect(recent[0]?.lastMessagePreview).toBe("new folded");
+    expect(store.listUnreadConversations().filter((conversation) => conversation.title === "Folded Friend")).toHaveLength(1);
+    store.close();
+  });
+
   it("isolates contacts, conversations, messages, and unread counts by active account", () => {
     const store = new SqliteStore(tempDb());
     const baseContactId = contactId("private", ["shared-contact"]);
