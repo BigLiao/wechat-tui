@@ -212,6 +212,8 @@ export class SqliteStore implements MessageStore {
   upsertContact(contact: ContactInput): ContactRecord {
     const accountId = this.requireActiveAccountId("upsert contact");
     const now = Date.now();
+    const existing = this.findContactById(contact.id);
+    const contactForStorage = stabilizeContactForUpsert(contact, existing);
     this.db
       .prepare(
         "INSERT INTO contacts " +
@@ -224,19 +226,19 @@ export class SqliteStore implements MessageStore {
       )
       .run(
         accountId,
-        contact.id,
-        contact.protocolId ?? null,
-        contact.kind,
-        contact.displayName,
-        contact.remarkName ?? null,
-        contact.nickName ?? null,
-        contact.alias ?? null,
-        contact.isSelf ? 1 : 0,
-        jsonString(contact.raw),
+        contactForStorage.id,
+        contactForStorage.protocolId ?? null,
+        contactForStorage.kind,
+        contactForStorage.displayName,
+        contactForStorage.remarkName ?? null,
+        contactForStorage.nickName ?? null,
+        contactForStorage.alias ?? null,
+        contactForStorage.isSelf ? 1 : 0,
+        jsonString(contactForStorage.raw),
         now
       );
 
-    const saved = this.findContactById(contact.id);
+    const saved = this.findContactById(contactForStorage.id);
     if (!saved) {
       throw new Error(`Failed to save contact ${contact.id}`);
     }
@@ -707,7 +709,7 @@ export class SqliteStore implements MessageStore {
       this.db
         .prepare(
           "UPDATE conversations SET title = ?, updated_at = ? " +
-            "WHERE account_id = ? AND protocol_id = ? AND (title = 'Unknown' OR title = 'Group member' OR title LIKE '@%')"
+            `WHERE account_id = ? AND protocol_id = ? AND ${unhelpfulNameSql("title")}`
         )
         .run(contact.displayName, now, accountId, contact.protocolId);
     }
@@ -718,29 +720,28 @@ export class SqliteStore implements MessageStore {
     if (!accountId) {
       return;
     }
-    if (!contact.protocolId || contact.isSelf || !isUsefulSenderName(contact.displayName)) {
+    if (contact.isSelf || !isUsefulSenderName(contact.displayName)) {
       return;
     }
 
+    const senderIdsSql = senderIdsForContactSql();
     const result = this.db
       .prepare(
-        "UPDATE messages SET sender_name = ? WHERE account_id = ? AND sender_id IN (" +
-          "SELECT id FROM contacts WHERE account_id = ? AND protocol_id = ? AND " +
-          "(display_name = 'Unknown' OR display_name = 'Group member' OR display_name LIKE '@%')" +
-          ") AND (sender_name = 'Unknown' OR sender_name = 'Group member' OR sender_name LIKE '@%')"
+        `UPDATE messages SET sender_name = ? WHERE account_id = ? AND sender_id IN (${senderIdsSql}) ` +
+          `AND ${unhelpfulNameSql("sender_name")}`
       )
-      .run(contact.displayName, accountId, accountId, contact.protocolId);
+      .run(contact.displayName, accountId, contact.id, accountId, contact.protocolId ?? null);
 
     this.db
       .prepare(
-        "UPDATE conversations SET last_message_sender_name = ? WHERE account_id = ? AND id IN (" +
-          "SELECT conversation_id FROM messages WHERE account_id = ? AND sender_id IN (" +
-          "SELECT id FROM contacts WHERE account_id = ? AND protocol_id = ? AND " +
-          "(display_name = 'Unknown' OR display_name = 'Group member' OR display_name LIKE '@%')" +
-          ")" +
-          ") AND (last_message_sender_name = 'Unknown' OR last_message_sender_name = 'Group member' OR last_message_sender_name LIKE '@%')"
+        "UPDATE conversations SET last_message_sender_name = ? WHERE account_id = ? " +
+          `AND ${unhelpfulNameSql("last_message_sender_name")} ` +
+          "AND (" +
+          "SELECT sender_id FROM messages WHERE account_id = conversations.account_id AND conversation_id = conversations.id " +
+          "ORDER BY timestamp DESC, created_at DESC LIMIT 1" +
+          `) IN (${senderIdsSql})`
       )
-      .run(contact.displayName, accountId, accountId, accountId, contact.protocolId);
+      .run(contact.displayName, accountId, contact.id, accountId, contact.protocolId ?? null);
 
     const changes = Number(result.changes);
     if (changes > 0) {
@@ -1065,6 +1066,33 @@ export class SqliteStore implements MessageStore {
 
 function isUsefulSenderName(value: string | undefined): value is string {
   return !!value && value !== "Unknown" && value !== "Group member" && !value.startsWith("@");
+}
+
+function unhelpfulNameSql(column: "sender_name" | "last_message_sender_name" | "title"): string {
+  return `(${column} = 'Unknown' OR ${column} = 'Group member' OR ${column} LIKE '@%')`;
+}
+
+function senderIdsForContactSql(): string {
+  return "SELECT ? AS id UNION SELECT id FROM contacts WHERE account_id = ? AND protocol_id = ?";
+}
+
+function stabilizeContactForUpsert(contact: ContactInput, existing: ContactRecord | undefined): ContactInput {
+  if (!existing || isUsefulSenderName(contact.displayName) || !isUsefulSenderName(existing.displayName)) {
+    return {
+      ...contact,
+      protocolId: contact.protocolId ?? existing?.protocolId
+    };
+  }
+
+  return {
+    ...contact,
+    protocolId: contact.protocolId ?? existing.protocolId,
+    displayName: existing.displayName,
+    remarkName: contact.remarkName ?? existing.remarkName,
+    nickName: contact.nickName ?? existing.nickName,
+    alias: contact.alias ?? existing.alias,
+    raw: existing.raw ?? contact.raw
+  };
 }
 
 function sameLazyMergeContact(left: ContactRecord, right: ContactRecord): boolean {

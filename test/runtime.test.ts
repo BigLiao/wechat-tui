@@ -232,6 +232,43 @@ describe("WeChatRuntime", () => {
     store.close();
   });
 
+  it("uses the stored useful contact name for a sparse incoming sender", async () => {
+    const store = new SqliteStore(tempDb());
+    const protocol = new MockProtocol();
+    const renderer = new FakeRenderer();
+    const runtime = new WeChatRuntime(protocol, store, renderer, { initialHistoryLimit: 10 });
+    const bossContact: ContactInput = {
+      id: contactId("private", ["boss"]),
+      protocolId: "@boss",
+      kind: "private",
+      displayName: "Boss",
+      remarkName: "Boss"
+    };
+    const sparseBoss: ContactInput = {
+      ...bossContact,
+      displayName: "Group member",
+      remarkName: undefined
+    };
+    const conversation = conversationFromContact(bossContact);
+
+    await runtime.start();
+    protocol.emit("message", {
+      id: localMessageId([conversation.id, "sparse boss"]),
+      conversation,
+      sender: sparseBoss,
+      isSelf: false,
+      content: "sparse boss",
+      type: "text",
+      timestamp: 1_700_000_000_000
+    });
+
+    const storedConversation = renderer.latest.conversations.find((item) => item.title === "Boss");
+    expect(storedConversation).toBeDefined();
+    expect(store.listMessages(storedConversation?.id ?? "")[0]?.senderName).toBe("Boss");
+    expect(storedConversation?.lastMessageSenderName).toBe("Boss");
+    store.close();
+  });
+
   it("uses redraw state for chats, keyboard navigation, chat input, unread status, and search", async () => {
     const store = new SqliteStore(tempDb());
     const protocol = new MockProtocol();

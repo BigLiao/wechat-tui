@@ -124,6 +124,145 @@ describe("SqliteStore", () => {
     store.close();
   });
 
+  it("backfills same-id placeholder sender names when a sparse contact becomes useful", () => {
+    const store = new SqliteStore(tempDb());
+    store.setActiveAccount(accountA);
+    const aliceId = contactId("private", ["@alice"]);
+    const sparseContact: ContactInput = {
+      id: aliceId,
+      protocolId: "@alice",
+      kind: "private",
+      displayName: "Group member"
+    };
+    const group: ContactInput = {
+      id: contactId("group", ["project"]),
+      protocolId: "@@project",
+      kind: "group",
+      displayName: "Project"
+    };
+    const conversation = conversationFromContact(group);
+
+    store.upsertContact(sparseContact);
+    store.saveMessage(
+      {
+        id: localMessageId([conversation.id, aliceId, "hello"]),
+        conversationId: conversation.id,
+        senderId: aliceId,
+        senderName: "Group member",
+        isSelf: false,
+        content: "hello",
+        type: "text",
+        timestamp: 1_700_000_000_000
+      },
+      conversation,
+      true
+    );
+
+    store.upsertContact({
+      ...sparseContact,
+      displayName: "Alice",
+      nickName: "Alice"
+    });
+
+    expect(store.listMessages(conversation.id)[0]?.senderName).toBe("Alice");
+    expect(store.findConversationById(conversation.id)?.lastMessageSenderName).toBe("Alice");
+    store.close();
+  });
+
+  it("does not backfill a conversation preview when the useful contact is not the latest sender", () => {
+    const store = new SqliteStore(tempDb());
+    store.setActiveAccount(accountA);
+    const aliceId = contactId("private", ["@alice"]);
+    const bobId = contactId("private", ["@bob"]);
+    const aliceSparse: ContactInput = {
+      id: aliceId,
+      protocolId: "@alice",
+      kind: "private",
+      displayName: "Group member"
+    };
+    const bobSparse: ContactInput = {
+      id: bobId,
+      protocolId: "@bob",
+      kind: "private",
+      displayName: "Group member"
+    };
+    const group: ContactInput = {
+      id: contactId("group", ["project"]),
+      protocolId: "@@project",
+      kind: "group",
+      displayName: "Project"
+    };
+    const conversation = conversationFromContact(group);
+
+    store.upsertContact(aliceSparse);
+    store.upsertContact(bobSparse);
+    store.saveMessage(
+      {
+        id: localMessageId([conversation.id, aliceId, "alice old"]),
+        conversationId: conversation.id,
+        senderId: aliceId,
+        senderName: "Group member",
+        isSelf: false,
+        content: "alice old",
+        type: "text",
+        timestamp: 1_700_000_000_000
+      },
+      conversation,
+      true
+    );
+    store.saveMessage(
+      {
+        id: localMessageId([conversation.id, bobId, "bob latest"]),
+        conversationId: conversation.id,
+        senderId: bobId,
+        senderName: "Group member",
+        isSelf: false,
+        content: "bob latest",
+        type: "text",
+        timestamp: 1_700_000_100_000
+      },
+      conversation,
+      true
+    );
+
+    store.upsertContact({
+      ...aliceSparse,
+      displayName: "Alice",
+      nickName: "Alice"
+    });
+
+    const messages = store.listMessages(conversation.id);
+    expect(messages[0]?.senderName).toBe("Alice");
+    expect(messages[1]?.senderName).toBe("Group member");
+    expect(store.findConversationById(conversation.id)?.lastMessagePreview).toBe("bob latest");
+    expect(store.findConversationById(conversation.id)?.lastMessageSenderName).toBe("Group member");
+    store.close();
+  });
+
+  it("keeps a useful contact name when a later sparse update arrives for the same id", () => {
+    const store = new SqliteStore(tempDb());
+    store.setActiveAccount(accountA);
+    const richContact: ContactInput = {
+      id: contactId("private", ["@alice"]),
+      protocolId: "@alice",
+      kind: "private",
+      displayName: "Alice",
+      nickName: "Alice"
+    };
+
+    store.upsertContact(richContact);
+    const saved = store.upsertContact({
+      ...richContact,
+      displayName: "Group member",
+      nickName: undefined
+    });
+
+    expect(saved.displayName).toBe("Alice");
+    expect(saved.nickName).toBe("Alice");
+    expect(store.listContacts("private", 10).map((contact) => contact.displayName)).toEqual(["Alice"]);
+    store.close();
+  });
+
   it("deduplicates protocol contacts and backfills placeholder conversation titles", () => {
     const store = new SqliteStore(tempDb());
     store.setActiveAccount(accountA);

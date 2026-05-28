@@ -765,6 +765,7 @@ export class WeChatRuntime extends EventEmitter {
   private handleIncomingMessage(incoming: IncomingProtocolMessage): void {
     const scopedIncoming = this.scopeIncomingMessage(incoming);
     let conversationContact = this.store.upsertContact(this.contactFromConversationInput(scopedIncoming.conversation));
+    let senderForMessage = scopedIncoming.sender;
     const senderIsGroupConversation =
       scopedIncoming.conversation.kind === "group" &&
       !!scopedIncoming.sender.protocolId &&
@@ -774,6 +775,7 @@ export class WeChatRuntime extends EventEmitter {
       (scopedIncoming.sender.id !== scopedIncoming.conversation.id || scopedIncoming.conversation.kind !== "group")
     ) {
       const senderContact = this.store.upsertContact(scopedIncoming.sender);
+      senderForMessage = senderContact;
       if (
         scopedIncoming.conversation.kind === "private" &&
         !!scopedIncoming.sender.protocolId &&
@@ -793,8 +795,8 @@ export class WeChatRuntime extends EventEmitter {
         id: scopedIncoming.id,
         protocolMessageId: scopedIncoming.protocolMessageId,
         conversationId: scopedIncoming.conversation.id,
-        senderId: scopedIncoming.sender.id,
-        senderName: scopedIncoming.isSelf ? "You" : scopedIncoming.sender.displayName,
+        senderId: senderForMessage.id,
+        senderName: scopedIncoming.isSelf ? "You" : senderForMessage.displayName,
         isSelf: scopedIncoming.isSelf,
         content: scopedIncoming.content,
         type: scopedIncoming.type,
