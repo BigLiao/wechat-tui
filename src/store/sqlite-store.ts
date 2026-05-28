@@ -1,6 +1,5 @@
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
-import { createRequire } from "node:module";
 import type { Logger } from "pino";
 import type { DatabaseSync } from "node:sqlite";
 import type {
@@ -23,10 +22,7 @@ import {
   summarizeSearchResults,
   summarizeStoredMessage
 } from "../logging.js";
-
-const require = createRequire(import.meta.url);
-
-type SqliteModule = typeof import("node:sqlite");
+import { loadNodeSqlite } from "../util/node-sqlite.js";
 
 interface ContactRow {
   account_id: string | null;
@@ -69,30 +65,6 @@ interface MessageRow {
   timestamp: number;
   raw_json: string | null;
   created_at: number;
-}
-
-let sqliteModule: SqliteModule | undefined;
-
-function loadSqlite(): SqliteModule {
-  if (sqliteModule) {
-    return sqliteModule;
-  }
-
-  const previousEmitWarning = process.emitWarning;
-  process.emitWarning = ((warning: string | Error, ...args: unknown[]) => {
-    const type = typeof args[0] === "string" ? args[0] : undefined;
-    if (type === "ExperimentalWarning" && String(warning).includes("SQLite")) {
-      return;
-    }
-    return (previousEmitWarning as (...innerArgs: unknown[]) => void).call(process, warning, ...args);
-  }) as typeof process.emitWarning;
-
-  try {
-    sqliteModule = require("node:sqlite") as SqliteModule;
-    return sqliteModule;
-  } finally {
-    process.emitWarning = previousEmitWarning;
-  }
 }
 
 function jsonString(value: unknown): string | null {
@@ -169,7 +141,7 @@ export class SqliteStore implements MessageStore {
   ) {
     this.options.logger?.debug({ dbPath }, "opening sqlite store");
     mkdirSync(dirname(dbPath), { recursive: true });
-    const { DatabaseSync } = loadSqlite();
+    const { DatabaseSync } = loadNodeSqlite();
     this.db = new DatabaseSync(dbPath);
     this.migrate();
     this.options.logger?.debug({ dbPath }, "sqlite store ready");

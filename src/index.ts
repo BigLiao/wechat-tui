@@ -2,6 +2,7 @@
 import { mkdirSync } from "node:fs";
 import process from "node:process";
 import { parseCliConfig, formatHelp } from "./config.js";
+import { checkStartupEnvironment, formatStartupEnvironmentReport } from "./environment-check.js";
 import { createDebugLogger, summarizeConfig } from "./logging.js";
 import { MockProtocol } from "./protocol/mock-protocol.js";
 import { Wechat4uAdapter } from "./protocol/wechat4u-adapter.js";
@@ -22,6 +23,13 @@ async function main(): Promise<void> {
 
   if (config.version) {
     process.stdout.write(`${packageInfo.version}\n`);
+    return;
+  }
+
+  const environment = checkStartupEnvironment({ dbPath: config.dbPath });
+  if (!environment.ok) {
+    process.stderr.write(`${formatStartupEnvironmentReport(environment)}\n`);
+    process.exitCode = 1;
     return;
   }
 
