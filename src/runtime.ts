@@ -64,6 +64,7 @@ export class WeChatRuntime extends EventEmitter {
   private activeAccountId?: string;
   private qr?: RenderState["qr"];
   private exiting = false;
+  private contactSnapshotApplied = false;
   private readonly fileRegistry = new FileRegistry();
   private readonly mediaCache = new MediaCache();
 
@@ -229,6 +230,12 @@ export class WeChatRuntime extends EventEmitter {
         this.options.logger?.warn({ count: contacts.length }, "dropping contacts received before account is known");
         return;
       }
+      // First contacts event after login = snapshot: mark all existing contacts stale
+      if (!this.contactSnapshotApplied) {
+        this.contactSnapshotApplied = true;
+        this.store.markAllContactsStale();
+        this.options.logger?.info({ count: contacts.length }, "applying contact snapshot (marked existing as stale)");
+      }
       this.store.upsertContacts(contacts.map((contact) => this.scopeContact(contact)));
       this.persistSessionData();
       if (this.view === "search") {
@@ -279,6 +286,7 @@ export class WeChatRuntime extends EventEmitter {
       this.messageScrollOffset = 0;
       this.conversationFocus = "list";
       this.fileRegistry.clear();
+      this.contactSnapshotApplied = false;
     }
   }
 

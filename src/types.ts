@@ -221,6 +221,7 @@ export interface MessageStore {
   clearData(): void;
   upsertContact(contact: ContactInput): ContactRecord;
   upsertContacts(contacts: ContactInput[]): ContactRecord[];
+  markAllContactsStale(): void;
   listContacts(kind?: ContactKind, limit?: number): ContactRecord[];
   findContactByName(query: string): ContactRecord | undefined;
   searchContacts(keyword: string, limit?: number): ContactRecord[];

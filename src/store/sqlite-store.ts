@@ -243,12 +243,12 @@ export class SqliteStore implements MessageStore {
     this.db
       .prepare(
         "INSERT INTO contacts " +
-          "(account_id, id, protocol_id, kind, display_name, remark_name, nick_name, alias, is_self, raw_json, updated_at) " +
-          "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
+          "(account_id, id, protocol_id, kind, display_name, remark_name, nick_name, alias, is_self, is_stale, raw_json, updated_at) " +
+          "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?) " +
           "ON CONFLICT(id) DO UPDATE SET " +
           "account_id = excluded.account_id, protocol_id = excluded.protocol_id, kind = excluded.kind, display_name = excluded.display_name, " +
           "remark_name = excluded.remark_name, nick_name = excluded.nick_name, alias = excluded.alias, " +
-          "is_self = excluded.is_self, raw_json = excluded.raw_json, updated_at = excluded.updated_at"
+          "is_self = excluded.is_self, is_stale = 0, raw_json = excluded.raw_json, updated_at = excluded.updated_at"
       )
       .run(
         accountId,
@@ -298,6 +298,17 @@ export class SqliteStore implements MessageStore {
     }
   }
 
+  markAllContactsStale(): void {
+    const accountId = this.currentAccountId();
+    if (!accountId) {
+      return;
+    }
+    this.db
+      .prepare("UPDATE contacts SET is_stale = 1 WHERE account_id = ? AND is_self = 0")
+      .run(accountId);
+    this.options.logger?.debug({ accountId }, "marked all contacts stale");
+  }
+
   listContacts(kind?: ContactKind, limit = 50): ContactRecord[] {
     const accountId = this.currentAccountId();
     if (!accountId) {
@@ -307,11 +318,11 @@ export class SqliteStore implements MessageStore {
     const rows = kind
       ? (this.db
           .prepare(
-            "SELECT * FROM contacts WHERE account_id = ? AND kind = ? AND is_self = 0 ORDER BY display_name COLLATE NOCASE LIMIT ?"
+            "SELECT * FROM contacts WHERE account_id = ? AND kind = ? AND is_self = 0 AND is_stale = 0 ORDER BY display_name COLLATE NOCASE LIMIT ?"
           )
           .all(accountId, kind, scanLimit) as unknown as ContactRow[])
       : (this.db
-          .prepare("SELECT * FROM contacts WHERE account_id = ? AND is_self = 0 ORDER BY display_name COLLATE NOCASE LIMIT ?")
+          .prepare("SELECT * FROM contacts WHERE account_id = ? AND is_self = 0 AND is_stale = 0 ORDER BY display_name COLLATE NOCASE LIMIT ?")
           .all(accountId, scanLimit) as unknown as ContactRow[]);
     const contacts = dedupeContactsByProtocol(rows.map(asContact)).slice(0, limit);
     this.options.logger?.debug({ kind, limit, count: contacts.length }, "listed contacts");
@@ -330,7 +341,7 @@ export class SqliteStore implements MessageStore {
     const like = `%${normalized}%`;
     const row = this.db
       .prepare(
-        "SELECT * FROM contacts WHERE is_self = 0 AND " +
+        "SELECT * FROM contacts WHERE is_self = 0 AND is_stale = 0 AND " +
           "account_id = ? AND " +
           "(lower(display_name) = ? OR lower(remark_name) = ? OR lower(nick_name) = ? OR lower(alias) = ? " +
           "OR lower(display_name) LIKE ? OR lower(remark_name) LIKE ? OR lower(nick_name) LIKE ? OR lower(alias) LIKE ?) " +
@@ -356,7 +367,7 @@ export class SqliteStore implements MessageStore {
     const rows = normalized
       ? (this.db
           .prepare(
-            "SELECT * FROM contacts WHERE account_id = ? AND is_self = 0 AND kind IN ('private', 'group') AND " +
+            "SELECT * FROM contacts WHERE account_id = ? AND is_self = 0 AND is_stale = 0 AND kind IN ('private', 'group') AND " +
               "(lower(display_name) LIKE ? OR lower(remark_name) LIKE ? OR lower(nick_name) LIKE ? OR lower(alias) LIKE ?) " +
               "ORDER BY CASE " +
               "WHEN lower(display_name) = ? THEN 0 WHEN lower(remark_name) = ? THEN 1 " +
@@ -377,7 +388,7 @@ export class SqliteStore implements MessageStore {
           ) as unknown as ContactRow[])
       : (this.db
           .prepare(
-            "SELECT * FROM contacts WHERE account_id = ? AND is_self = 0 AND kind IN ('private', 'group') ORDER BY updated_at DESC, display_name COLLATE NOCASE LIMIT ?"
+            "SELECT * FROM contacts WHERE account_id = ? AND is_self = 0 AND is_stale = 0 AND kind IN ('private', 'group') ORDER BY updated_at DESC, display_name COLLATE NOCASE LIMIT ?"
           )
           .all(accountId, scanLimit) as unknown as ContactRow[]);
     const contacts = dedupeContactsByProtocol(rows.map(asContact)).slice(0, limit);
@@ -681,15 +692,28 @@ export class SqliteStore implements MessageStore {
 
   private backfillConversationTitlesFromContact(contact: ContactRecord): void {
     const accountId = this.currentAccountId();
-    if (!accountId || !contact.protocolId || !isUsefulSenderName(contact.displayName)) {
+    if (!accountId || !contact.protocolId) {
       return;
     }
+    const now = Date.now();
+
+    // Update the conversation's protocol_id to the latest UserName (by stable conversation ID)
+    const conversationId = `conversation:${contact.id}`;
     this.db
       .prepare(
-        "UPDATE conversations SET title = ?, updated_at = ? " +
-          "WHERE account_id = ? AND protocol_id = ? AND (title = 'Unknown' OR title = 'Group member' OR title LIKE '@%')"
+        "UPDATE conversations SET protocol_id = ?, updated_at = ? WHERE account_id = ? AND id = ?"
       )
-      .run(contact.displayName, Date.now(), accountId, contact.protocolId);
+      .run(contact.protocolId, now, accountId, conversationId);
+
+    // Update titles for conversations matching this protocol_id with unhelpful names
+    if (isUsefulSenderName(contact.displayName)) {
+      this.db
+        .prepare(
+          "UPDATE conversations SET title = ?, updated_at = ? " +
+            "WHERE account_id = ? AND protocol_id = ? AND (title = 'Unknown' OR title = 'Group member' OR title LIKE '@%')"
+        )
+        .run(contact.displayName, now, accountId, contact.protocolId);
+    }
   }
 
   private backfillSenderNameFromContact(contact: ContactRecord): void {
@@ -825,6 +849,7 @@ export class SqliteStore implements MessageStore {
       );
     `);
     this.ensureColumn("contacts", "account_id", "TEXT");
+    this.ensureColumn("contacts", "is_stale", "INTEGER DEFAULT 0");
     this.ensureColumn("conversations", "account_id", "TEXT");
     this.ensureColumn("conversations", "last_message_sender_name", "TEXT");
     this.ensureColumn("conversations", "last_message_is_self", "INTEGER");
