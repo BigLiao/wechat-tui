@@ -609,7 +609,9 @@ export class WeChatRuntime extends EventEmitter {
       this.errorMessage = "no active conversation";
       return;
     }
-    if (!activeConversation.protocolId) {
+    // Resolve the current protocol ID: prefer a fresh lookup from active contacts
+    const protocolId = this.resolveCurrentProtocolId(activeConversation);
+    if (!protocolId) {
       this.errorMessage = "active conversation has no current protocol id";
       return;
     }
@@ -617,14 +619,14 @@ export class WeChatRuntime extends EventEmitter {
     this.options.logger?.debug(
       {
         conversationId: activeConversation.id,
-        protocolId: activeConversation.protocolId,
+        protocolId,
         textLength: text.length,
         textPreview: preview(text)
       },
       "sending active chat message"
     );
     try {
-      const sent = await this.protocol.sendText(activeConversation.protocolId, text);
+      const sent = await this.protocol.sendText(protocolId, text);
       const now = Date.now();
       const currentUser = this.protocol.getCurrentUser();
       const message: MessageInput = {
@@ -664,7 +666,8 @@ export class WeChatRuntime extends EventEmitter {
       this.errorMessage = "no active conversation";
       return;
     }
-    if (!activeConversation.protocolId) {
+    const protocolId = this.resolveCurrentProtocolId(activeConversation);
+    if (!protocolId) {
       this.errorMessage = "active conversation has no current protocol id";
       return;
     }
@@ -683,7 +686,7 @@ export class WeChatRuntime extends EventEmitter {
     );
 
     try {
-      const sent = await this.protocol.sendFile(activeConversation.protocolId, filePath);
+      const sent = await this.protocol.sendFile(protocolId, filePath);
       const now = Date.now();
       const currentUser = this.protocol.getCurrentUser();
       const content = `[${type}] ${filename}`;
@@ -896,6 +899,30 @@ export class WeChatRuntime extends EventEmitter {
       return undefined;
     }
     return this.store.findConversationById(this.activeConversationId);
+  }
+
+  /**
+   * Resolve the current valid protocol ID for a conversation.
+   * After re-login, UserNames change so the stored protocolId may be stale.
+   * We look up by title (displayName) in active contacts to find the fresh one.
+   */
+  private resolveCurrentProtocolId(conversation: ConversationRecord): string | undefined {
+    // First try: find a non-stale contact with the same display name
+    const contact = this.store.findContactByName(conversation.title);
+    if (contact?.protocolId) {
+      // Update the conversation's protocolId for future use
+      if (contact.protocolId !== conversation.protocolId) {
+        this.store.upsertConversation({
+          id: conversation.id,
+          protocolId: contact.protocolId,
+          kind: conversation.kind,
+          title: conversation.title
+        });
+      }
+      return contact.protocolId;
+    }
+    // Fallback: use the stored protocolId (may be stale but worth trying)
+    return conversation.protocolId;
   }
 
   private startUpdateCheck(): void {
