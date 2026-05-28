@@ -1,5 +1,3 @@
-import { existsSync } from "node:fs";
-import { extname } from "node:path";
 import process from "node:process";
 import {
   CombinedAutocompleteProvider,
@@ -8,6 +6,7 @@ import {
 import type { Component, EditorTheme, SelectListTheme, TUI } from "@earendil-works/pi-tui";
 import { theme } from "../theme.js";
 import type { UiEvent } from "../../types.js";
+import { imageFilePathFromPastedText } from "../../util/path-input.js";
 
 const COMMANDS = [
   { name: "send", description: "Send a file (image, video, doc)" },
@@ -27,18 +26,9 @@ const editorTheme: EditorTheme = {
   selectList: selectListTheme
 };
 
-const IMAGE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp"]);
 const BRACKETED_PASTE_START = "\x1b[200~";
 const BRACKETED_PASTE_END = "\x1b[201~";
 const IMAGE_MARKER_REGEX = /\[Image #(\d+)\]/g;
-
-function isImageFilePath(text: string): boolean {
-  const trimmed = text.trim();
-  if (!trimmed) return false;
-  if (!/^[/~.]/.test(trimmed)) return false;
-  const ext = extname(trimmed).toLowerCase();
-  return IMAGE_EXTENSIONS.has(ext);
-}
 
 /**
  * Chat editor — minimal input at the bottom.
@@ -136,13 +126,14 @@ export class ChatEditor implements Component {
     if (endIdx === -1) return undefined;
 
     const pasteContent = data.slice(startIdx + BRACKETED_PASTE_START.length, endIdx);
-    if (!isImageFilePath(pasteContent) || !existsSync(pasteContent.trim())) {
+    const imagePath = imageFilePathFromPastedText(pasteContent);
+    if (!imagePath) {
       return undefined;
     }
 
     this.imageCounter++;
     const id = this.imageCounter;
-    this.imageAttachments.set(id, pasteContent.trim());
+    this.imageAttachments.set(id, imagePath);
     const marker = `[Image #${id}]`;
     return (
       data.slice(0, startIdx) +

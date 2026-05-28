@@ -1,6 +1,6 @@
 import { EventEmitter } from "node:events";
 import { existsSync, writeFileSync, rmSync, readdirSync } from "node:fs";
-import { resolve, basename, extname, join } from "node:path";
+import { basename, extname, join } from "node:path";
 import { homedir } from "node:os";
 import type { Logger } from "pino";
 import {
@@ -34,6 +34,7 @@ import { conversationFromContact, localMessageId } from "./util/ids.js";
 import { FileRegistry } from "./util/file-hash.js";
 import { MediaCache, extensionFromContentType } from "./util/media-cache.js";
 import { openWithSystem, revealInFileManager } from "./util/open.js";
+import { normalizeUserFilePath } from "./util/path-input.js";
 
 export interface RuntimeOptions {
   initialHistoryLimit?: number;
@@ -660,7 +661,7 @@ export class WeChatRuntime extends EventEmitter {
       return;
     }
 
-    const filePath = resolveFilePath(rawPath);
+    const filePath = normalizeUserFilePath(rawPath);
     if (!existsSync(filePath)) {
       this.errorMessage = `file not found: ${filePath}`;
       return;
@@ -1135,14 +1136,6 @@ function clampSelection(index: number, length: number): number {
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max);
-}
-
-function resolveFilePath(rawPath: string): string {
-  const trimmed = rawPath.trim();
-  if (trimmed.startsWith("~")) {
-    return resolve(homedir(), trimmed.slice(trimmed.startsWith("~/") ? 2 : 1));
-  }
-  return resolve(trimmed);
 }
 
 const IMAGE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp"]);

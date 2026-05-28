@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
@@ -149,6 +149,15 @@ class PublicConversationProtocol extends EventEmitter implements WeChatProtocol 
       type: "notice",
       timestamp
     });
+  }
+}
+
+class CapturingFileProtocol extends MockProtocol {
+  readonly sentFiles: Array<{ toProtocolId: string; filePath: string }> = [];
+
+  override async sendFile(toProtocolId: string, filePath: string): Promise<{ messageId?: string; raw?: unknown }> {
+    this.sentFiles.push({ toProtocolId, filePath });
+    return super.sendFile(toProtocolId, filePath);
   }
 }
 
@@ -306,6 +315,27 @@ describe("WeChatRuntime", () => {
     expect(renderer.latest.chatInput).toBe("draft");
     expect(renderer.latest.messageScrollOffset).toBe(0);
 
+    store.close();
+  });
+
+  it("sends quoted image paths with spaces", async () => {
+    const imageDir = mkdtempSync(join(tmpdir(), "wechat-tui-send-image-"));
+    tempDirs.push(imageDir);
+    const imagePath = join(imageDir, "截屏2026-05-28 10.06.35.png");
+    writeFileSync(imagePath, "fake png");
+    const store = new SqliteStore(tempDb());
+    const protocol = new CapturingFileProtocol();
+    const renderer = new FakeRenderer();
+    const runtime = new WeChatRuntime(protocol, store, renderer, { initialHistoryLimit: 10 });
+
+    await runtime.start();
+    protocol.emitIncoming("Boss", "hello", 1_700_000_000_000);
+    await runtime.handleKey(key.enter());
+    await runtime.handleUiEvent({ type: "chat-submit", text: `/send "${imagePath}"` });
+
+    expect(protocol.sentFiles.at(-1)?.filePath).toBe(imagePath);
+    expect(renderer.latest.errorMessage).toBeUndefined();
+    expect(renderer.latest.messages.at(-1)?.content).toContain("[image]");
     store.close();
   });
 
