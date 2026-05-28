@@ -10,6 +10,7 @@ import {
 import type { Terminal } from "@earendil-works/pi-tui";
 import type { RenderState, UiEvent, UiKey, WorkbenchRenderer } from "../types.js";
 import { WechatApp } from "../tui/wechat-app.js";
+import type { FileRegistry } from "../util/file-hash.js";
 
 const BRACKETED_PASTE_START = "\x1b[200~";
 const BRACKETED_PASTE_END = "\x1b[201~";
@@ -19,12 +20,21 @@ export class WorkbenchTerminalRenderer implements WorkbenchRenderer {
   private app?: WechatApp;
   private removeInputListener?: () => void;
   private closeHandler?: () => void;
+  private fileRegistry?: FileRegistry;
 
   constructor(private readonly terminal: Terminal = new ProcessTerminal()) {}
+
+  setFileRegistry(registry: FileRegistry): void {
+    this.fileRegistry = registry;
+    this.app?.setFileRegistry(registry);
+  }
 
   start(onEvent: (event: UiEvent) => void, onClose: () => void): void {
     this.tui = new TUI(this.terminal);
     this.app = new WechatApp(this.tui, onEvent);
+    if (this.fileRegistry) {
+      this.app.setFileRegistry(this.fileRegistry);
+    }
     this.tui.addChild(this.app);
     this.removeInputListener = this.tui.addInputListener((data) => {
       // Intercept bracketed paste containing image file paths in chat view
@@ -52,7 +62,7 @@ export class WorkbenchTerminalRenderer implements WorkbenchRenderer {
       }
 
       // Let focused components (Editor, SelectList) handle input directly
-      if (this.app?.isChatView() && !isGlobalChatKey(key)) {
+      if (this.app?.isChatView() && !isGlobalChatKey(key, this.app)) {
         return undefined;
       }
       if (this.app?.isChatsView() && !isGlobalChatsKey(key)) {
@@ -149,8 +159,15 @@ function printableData(data: string): string {
   return "";
 }
 
-function isGlobalChatKey(key: UiKey): boolean {
-  return key.ctrl === true || key.name === "escape" || key.name === "up" || key.name === "down";
+function isGlobalChatKey(key: UiKey, app: WechatApp): boolean {
+  if (key.ctrl === true || key.name === "escape") {
+    return true;
+  }
+  // When autocomplete is active (typing a / command), let Editor handle up/down
+  if ((key.name === "up" || key.name === "down") && app.isChatAutocompleteActive()) {
+    return false;
+  }
+  return key.name === "up" || key.name === "down";
 }
 
 function isGlobalChatsKey(key: UiKey): boolean {

@@ -21,6 +21,7 @@ wechat-tui
 本地数据默认存放在 `~/.wechat-tui`：
 
 - 数据库：`~/.wechat-tui/wechat-tui.sqlite`
+- 媒体缓存：`~/.wechat-tui/cache/<会话ID>/`
 - 调试日志：`~/.wechat-tui/logs/`
 
 联系人、会话、消息和未读计数会按当前登录账号隔离，避免同一台机器上的多个账号互相混用数据。
@@ -38,26 +39,10 @@ wechat-tui --db /tmp/wechat-tui.sqlite
 wechat-tui --debug
 ```
 
-日志文件路径形如：
-
-```text
-~/.wechat-tui/logs/wechat-tui-<timestamp>-<pid>.log
-```
-
-日志会记录协议状态变化、消息解析摘要、界面路由、数据库读写和错误信息。登录会话和 cookie 等敏感字段会被脱敏。
-
 本地冒烟测试可以使用 mock 协议，不需要微信登录：
 
 ```bash
 wechat-tui --mock
-```
-
-## 本地开发
-
-```bash
-npm install
-npm run build
-npm link
 ```
 
 ## 快捷键
@@ -65,11 +50,11 @@ npm link
 最近会话列表：
 
 ```text
-输入文字    过滤最近会话
-Backspace   删除过滤文本
 ↑/↓         选择会话
 Enter       打开选中的会话
-Esc/q       退出
+/           打开命令面板
+q           退出
+Ctrl+C      退出
 ```
 
 聊天页面：
@@ -77,7 +62,7 @@ Esc/q       退出
 ```text
 输入文字    编辑消息
 Enter       发送消息
-↑/↓         滚动消息列表
+↑/↓         滚动消息列表（输入 / 命令时为选择补全项）
 Esc         返回最近会话列表
 ```
 
@@ -85,30 +70,69 @@ Esc         返回最近会话列表
 
 ```text
 输入文字    搜索联系人和群聊
-Backspace   删除搜索文本
 ↑/↓         选择结果
 Enter       打开选中的联系人或群聊
 Esc         返回上一页
 ```
 
-聊天输入框支持的命令：
+## 命令
+
+### 全局命令面板（首页按 `/`）
+
+| 命令 | 说明 |
+|------|------|
+| `/contacts` | 搜索联系人和群聊 |
+| `/clear` | 清理本地消息和日志（保留登录态） |
+| `/logout` | 登出并退出 |
+| `/quit` | 退出 |
+
+### 聊天输入框命令
+
+| 命令 | 说明 |
+|------|------|
+| `/send <路径>` | 发送文件（图片、视频、文档） |
+| `/view <hash>` | 打开媒体文件（支持 `/view a1c1` 或 `/view #a1c1`） |
+
+## 媒体文件
+
+收到的图片、表情包、视频、语音、文件会自动下载并缓存到本地，按会话分目录保存：
 
 ```text
-/contacts  搜索联系人和群聊
-/chats     返回最近会话列表
-/status    显示连接状态
-/refresh   刷新联系人
-/load      显示本地历史状态
-/quit      退出
+~/.wechat-tui/cache/
+  <会话ID>/
+    photo.jpg
+    sticker_12345.gif
+    document.pdf
 ```
+
+下载成功后，消息会显示一个 4 位 hash 标识：
+
+```text
+[image #a1c1]
+[sticker #f3b2]
+[file #7c89] report.pdf
+```
+
+使用 `/view <hash>` 可以打开文件：
+- 图片、视频、音频 → 调用系统默认应用打开
+- 其他文件 → 在 Finder / 资源管理器中定位
+
+未下载成功的媒体消息不会显示 hash。
 
 ## 消息行为
 
 收到的新消息会先写入本地数据库，再刷新当前界面。当前聊天里的新消息会直接显示在聊天页面；其他会话的新消息会更新未读状态和底部状态栏。
 
-公众号会话会在最近会话列表中折叠为一项 `公众号`。公众号消息会保存到本地数据库，但不会进入未读列表，也不会触发未读提醒。
+公众号会话会在最近会话列表中折叠为一项「公众号」。公众号消息保存到本地数据库但不会触发未读提醒，也不会自动下载媒体。
 
-图片、语音、视频、文件、小程序、表情等非文本消息会显示为占位符，例如 `[image]`、`[voice]`、`[video]`、`[file] filename`、`[mini-program]`、`[sticker]` 或 `[unsupported]`。
+## 本地开发
+
+```bash
+npm install
+npm run build
+npm run dev    # 使用 tsx 直接运行
+npm test       # 运行测试
+```
 
 ## 注意事项
 

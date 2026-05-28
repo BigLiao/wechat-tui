@@ -3,6 +3,7 @@ import type {
   ConnectionState,
   ContactInput,
   IncomingProtocolMessage,
+  MediaDownloadResult,
   UserProfile,
   WeChatProtocol
 } from "../types.js";
@@ -71,6 +72,10 @@ export class MockProtocol extends EventEmitter implements WeChatProtocol {
   async sendFile(toProtocolId: string, filePath: string): Promise<{ messageId?: string; raw?: unknown }> {
     const messageId = localMessageId(["mock-send-file", toProtocolId, filePath, String(Date.now())]);
     return { messageId, raw: { ok: true, filePath } };
+  }
+
+  async downloadMedia(_message: IncomingProtocolMessage): Promise<MediaDownloadResult | undefined> {
+    return undefined;
   }
 
   async getContacts(): Promise<ContactInput[]> {

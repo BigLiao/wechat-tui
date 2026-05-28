@@ -8,6 +8,7 @@ import type {
   ContactInput,
   ContactKind,
   IncomingProtocolMessage,
+  MediaDownloadResult,
   MessageKind,
   ProtocolQrEvent,
   UserProfile,
@@ -31,6 +32,10 @@ type RawWechatBot = EventEmitter & {
   setPollingTargetGetter?: (getter: () => string) => void;
   sendText?: (text: string, toUserName: string) => Promise<unknown>;
   sendMsg?: (msg: string | { file: unknown; filename: string }, toUserName: string) => Promise<unknown>;
+  getMsgImg?: (msgId: string) => Promise<{ data: ArrayBuffer; type: string }>;
+  getVideo?: (msgId: string) => Promise<{ data: ArrayBuffer; type: string }>;
+  getVoice?: (msgId: string) => Promise<{ data: ArrayBuffer; type: string }>;
+  getDoc?: (fromUserName: string, mediaId: string, fileName: string) => Promise<{ data: ArrayBuffer; type: string }>;
 };
 
 interface RawContact {
@@ -64,6 +69,7 @@ interface RawMessage {
   FileName?: string;
   FileNameTitle?: string;
   FileSize?: number | string;
+  MediaId?: string;
   Url?: string;
   CreateTime?: number;
   StatusNotifyCode?: number;
@@ -172,6 +178,68 @@ export class Wechat4uAdapter extends EventEmitter implements WeChatProtocol {
     const messageId = extractSentMessageId(raw);
     this.options.logger?.debug({ toProtocolId, messageId, raw: summarizeRawWechatMessage(raw) }, "wechat file send completed");
     return { messageId, raw };
+  }
+
+  async downloadMedia(message: IncomingProtocolMessage): Promise<MediaDownloadResult | undefined> {
+    if (!this.bot) {
+      return undefined;
+    }
+    const msgId = message.protocolMessageId;
+    if (!msgId) {
+      return undefined;
+    }
+
+    const raw = message.raw as RawMessage | undefined;
+    try {
+      let result: { data: ArrayBuffer; type: string } | undefined;
+
+      switch (message.type) {
+        case "image":
+        case "sticker":
+          if (this.bot.getMsgImg) {
+            result = await this.bot.getMsgImg(msgId);
+          }
+          break;
+        case "video":
+          if (this.bot.getVideo) {
+            result = await this.bot.getVideo(msgId);
+          }
+          break;
+        case "voice":
+          if (this.bot.getVoice) {
+            result = await this.bot.getVoice(msgId);
+          }
+          break;
+        case "file": {
+          const fromUser = raw?.FromUserName;
+          const mediaId = raw?.MediaId ?? extractAttachId(raw?.Content);
+          const fileName = raw?.FileName ?? raw?.FileNameTitle;
+          if (this.bot.getDoc && fromUser && mediaId && fileName) {
+            result = await this.bot.getDoc(fromUser, mediaId, fileName);
+          }
+          break;
+        }
+        default:
+          return undefined;
+      }
+
+      if (!result?.data) {
+        return undefined;
+      }
+
+      this.options.logger?.debug(
+        { msgId, type: message.type, contentType: result.type, size: result.data.byteLength },
+        "media downloaded"
+      );
+
+      return {
+        data: Buffer.from(result.data),
+        contentType: result.type ?? "application/octet-stream"
+      };
+    } catch (error) {
+      this.options.logger?.debug({ err: error, msgId, type: message.type }, "media download failed");
+      return undefined;
+    }
   }
 
   async getContacts(): Promise<ContactInput[]> {
@@ -714,6 +782,14 @@ function normalizeRawContent(input: unknown): string {
 function tagValue(xml: string, tag: string): string | undefined {
   const match = xml.match(new RegExp(`<${tag}\\b[^>]*>([\\s\\S]*?)<\\/${tag}>`, "i"));
   return match?.[1];
+}
+
+function extractAttachId(content: unknown): string | undefined {
+  if (!content || typeof content !== "string") {
+    return undefined;
+  }
+  const match = content.match(/<attachid>([^<]+)<\/attachid>/i);
+  return match?.[1]?.trim() || undefined;
 }
 
 function attributeValue(xml: string, attribute: string): string | undefined {

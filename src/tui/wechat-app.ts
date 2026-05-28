@@ -10,6 +10,7 @@ import { ContactSearchScreen } from "./contact-search-screen.js";
 import { ChatEditor } from "./components/chat-editor.js";
 import { CommandPanel } from "./components/command-panel.js";
 import { ConfirmPanel } from "./components/confirm-panel.js";
+import type { FileRegistry } from "../util/file-hash.js";
 
 const SEARCH_ITEM_VALUE = "__search__";
 
@@ -55,6 +56,7 @@ export class WechatApp implements Component {
   private conversationList: SelectList;
   private conversationItems: SelectItem[] = [];
   private conversationListSignature = "";
+  private fileRegistry?: FileRegistry;
 
   constructor(
     private readonly tui: TUI,
@@ -164,6 +166,10 @@ export class WechatApp implements Component {
     return this.state.view === "chat";
   }
 
+  isChatAutocompleteActive(): boolean {
+    return this.state.view === "chat" && this.state.chatInput.startsWith("/");
+  }
+
   isCommandPanelVisible(): boolean {
     return this.commandPanelVisible || this.confirmPanelVisible;
   }
@@ -197,6 +203,10 @@ export class WechatApp implements Component {
     return this.chatEditor.transformPasteData(data);
   }
 
+  setFileRegistry(registry: FileRegistry): void {
+    this.fileRegistry = registry;
+  }
+
   invalidate(): void {
     this.chatEditor.invalidate();
     this.conversationList.invalidate();
@@ -214,7 +224,7 @@ export class WechatApp implements Component {
         return this.conversationScreen.render(this.state, width, rows, this.conversationList, overlay);
       }
       case "chat":
-        return this.chatScreen.render(this.state, width, rows);
+        return this.chatScreen.render(this.state, width, rows, this.fileRegistry);
       case "search":
         return this.contactSearchScreen.render(this.state, width, rows);
     }

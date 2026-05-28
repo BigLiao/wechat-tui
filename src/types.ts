@@ -131,12 +131,18 @@ export interface UpdateInfo {
   installCommand: string;
 }
 
+export interface MediaDownloadResult {
+  data: Buffer;
+  contentType: string;
+}
+
 export interface WeChatProtocol extends EventEmitter {
   start(sessionData?: unknown): Promise<void>;
   reconnect(): Promise<void>;
   logout(): Promise<void>;
   sendText(toProtocolId: string, text: string): Promise<{ messageId?: string; raw?: unknown }>;
   sendFile(toProtocolId: string, filePath: string): Promise<{ messageId?: string; raw?: unknown }>;
+  downloadMedia(message: IncomingProtocolMessage): Promise<MediaDownloadResult | undefined>;
   getContacts(): Promise<ContactInput[]>;
   getCurrentUser(): UserProfile | undefined;
   getSessionData(): unknown | undefined;
@@ -197,6 +203,7 @@ export interface WorkbenchRenderer {
   start(onEvent: (event: UiEvent) => void, onClose: () => void): void;
   stop(): void;
   render(state: RenderState): void;
+  setFileRegistry?(registry: unknown): void;
 }
 
 export interface SearchResult {
@@ -221,6 +228,7 @@ export interface MessageStore {
   findConversationById(id: string): ConversationRecord | undefined;
   findConversationByName(query: string): ConversationRecord | undefined;
   saveMessage(message: MessageInput, conversation: ConversationInput, incrementUnread: boolean): MessageRecord;
+  updateMessageRaw(messageId: string, raw: unknown): void;
   listRecentConversations(limit?: number): ConversationRecord[];
   listUnreadConversations(limit?: number): ConversationRecord[];
   listMessages(conversationId: string, limit?: number): MessageRecord[];

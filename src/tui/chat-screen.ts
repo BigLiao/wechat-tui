@@ -4,6 +4,7 @@ import { StatusBar, HINTS_CHAT } from "./components/status-bar.js";
 import { MessageList } from "./components/message-list.js";
 import { ChatEditor } from "./components/chat-editor.js";
 import type { RenderState } from "../types.js";
+import type { FileRegistry } from "../util/file-hash.js";
 
 export class ChatScreen {
   private readonly header = new Header();
@@ -12,7 +13,7 @@ export class ChatScreen {
 
   constructor(private readonly editor: ChatEditor) {}
 
-  render(state: RenderState, width: number, rows: number): string[] {
+  render(state: RenderState, width: number, rows: number, fileRegistry?: FileRegistry): string[] {
     // Fixed top: header with conversation title as subtitle
     const headerLines = this.header.render(state, state.activeConversation?.title ?? "", width);
 
@@ -38,7 +39,7 @@ export class ChatScreen {
       1,
       rows - headerLines.length - errorLines.length - otherUnreadLines.length - bottomLines.length
     );
-    const contentLines = this.messages.render(state, width, messageRows);
+    const contentLines = this.messages.render(state, width, messageRows, fileRegistry);
 
     // Layout: header → fill → error + content → bottom (bottom-aligned)
     const fixedCount =

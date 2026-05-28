@@ -10,7 +10,8 @@ import { theme } from "../theme.js";
 import type { UiEvent } from "../../types.js";
 
 const COMMANDS = [
-  { name: "send", description: "Send a file (image, video, doc)" }
+  { name: "send", description: "Send a file (image, video, doc)" },
+  { name: "view", description: "Open a file by hash (e.g. /view a1c1)" }
 ];
 
 const selectListTheme: SelectListTheme = {
@@ -64,11 +65,16 @@ export class ChatEditor implements Component {
   }
 
   private handleSubmit(text: string): void {
-    // When /send is selected from autocomplete without a file path argument,
-    // put it back into the editor instead of submitting — let the user type the path.
+    // When /send or /view is selected from autocomplete without arguments,
+    // put it back into the editor instead of submitting — let the user type the argument.
     if (/^\/send\s*$/.test(text)) {
       this.syncText("/send ");
       this.onEvent({ type: "chat-change", text: "/send " });
+      return;
+    }
+    if (/^\/view\s*$/.test(text)) {
+      this.syncText("/view ");
+      this.onEvent({ type: "chat-change", text: "/view " });
       return;
     }
 

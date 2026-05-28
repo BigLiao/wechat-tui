@@ -583,6 +583,16 @@ export class SqliteStore implements MessageStore {
     return messages;
   }
 
+  updateMessageRaw(messageId: string, raw: unknown): void {
+    const accountId = this.currentAccountId();
+    if (!accountId) {
+      return;
+    }
+    this.db
+      .prepare("UPDATE messages SET raw_json = ? WHERE account_id = ? AND id = ?")
+      .run(jsonString(raw), accountId, messageId);
+  }
+
   searchMessages(keyword: string, limit = 50, conversationId?: string): SearchResult[] {
     const accountId = this.currentAccountId();
     if (!accountId) {

@@ -2,6 +2,7 @@ import { wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { theme, fit } from "../theme.js";
 import { formatClock } from "../../util/time.js";
 import type { ConversationRecord, MessageRecord, RenderState } from "../../types.js";
+import type { FileRegistry } from "../../util/file-hash.js";
 
 /**
  * Message list — terminal log format with breathing room.
@@ -13,7 +14,7 @@ import type { ConversationRecord, MessageRecord, RenderState } from "../../types
  * I'm good, thanks!
  */
 export class MessageList {
-  render(state: RenderState, width: number, rows: number): string[] {
+  render(state: RenderState, width: number, rows: number, fileRegistry?: FileRegistry): string[] {
     const conversation = state.activeConversation;
     if (!conversation) {
       return [fit(`  ${theme.dim("No active conversation.")}`, width)];
@@ -30,7 +31,7 @@ export class MessageList {
       if (i > 0) {
         allLines.push(""); // breathing room between messages
       }
-      allLines.push(...formatMessage(message, conversation, width));
+      allLines.push(...formatMessage(message, conversation, width, fileRegistry));
     }
 
     const maxOffset = Math.max(0, allLines.length - budget);
@@ -41,7 +42,7 @@ export class MessageList {
   }
 }
 
-function formatMessage(message: MessageRecord, conversation: ConversationRecord, width: number): string[] {
+function formatMessage(message: MessageRecord, conversation: ConversationRecord, width: number, fileRegistry?: FileRegistry): string[] {
   const lines: string[] = [];
 
   // Header: [HH:MM] Sender
@@ -55,7 +56,7 @@ function formatMessage(message: MessageRecord, conversation: ConversationRecord,
   lines.push(fit(`${timeStyled} ${senderStyled}`, width));
 
   // Content
-  const content = messageDisplayContent(message);
+  const content = messageDisplayContent(message, conversation, fileRegistry);
   const contentWidth = Math.max(1, width - 2);
   const wrapped = wrapTextWithAnsi(content, contentWidth);
   for (const line of wrapped) {
@@ -73,37 +74,70 @@ function readableGroupSenderName(input: string | undefined): string {
   return name;
 }
 
-function messageDisplayContent(message: MessageRecord): string {
+function messageDisplayContent(message: MessageRecord, conversation: ConversationRecord, fileRegistry?: FileRegistry): string {
   switch (message.type) {
     case "text":
     case "notice":
     case "link":
-    case "file":
     case "mini-program":
-      return message.content || placeholderForMessage(message);
+      return message.content || placeholderForMessage(message, conversation, fileRegistry);
+    case "file":
+      // File messages always go through placeholder to ensure hash is appended
+      if (message.content) {
+        return appendFileHash(message, conversation, fileRegistry, message.content);
+      }
+      return placeholderForMessage(message, conversation, fileRegistry);
     default:
-      return placeholderForMessage(message);
+      return placeholderForMessage(message, conversation, fileRegistry);
   }
 }
 
-function placeholderForMessage(message: MessageRecord): string {
+function appendFileHash(message: MessageRecord, conversation: ConversationRecord, fileRegistry?: FileRegistry, content?: string): string {
+  if (!fileRegistry || !FILE_TYPES.has(message.type)) {
+    return content ?? "";
+  }
+  const localPath = rawString(message.raw, "localFilePath");
+  // Only show hash when file is locally available
+  if (!localPath) {
+    return content ?? "";
+  }
+  const hash = fileRegistry.register(conversation.id, message.id, localPath);
+  const text = content ?? `[${message.type}]`;
+  // Insert hash after the type tag: [file #xxxx] rest...
+  const tagMatch = text.match(/^\[([^\]]+)\]/);
+  if (tagMatch) {
+    return theme.dim(`[${tagMatch[1]} #${hash}]`) + text.slice(tagMatch[0].length);
+  }
+  return theme.dim(`[#${hash}] `) + text;
+}
+
+/** Types that represent viewable file resources */
+const FILE_TYPES = new Set<string>(["image", "video", "voice", "file", "sticker"]);
+
+function placeholderForMessage(message: MessageRecord, conversation: ConversationRecord, fileRegistry?: FileRegistry): string {
+  const localPath = rawString(message.raw, "localFilePath");
+  // Only show hash when file is locally available (downloaded or sent)
+  const hashSuffix = fileRegistry && localPath && FILE_TYPES.has(message.type)
+    ? ` #${fileRegistry.register(conversation.id, message.id, localPath)}`
+    : "";
+
   switch (message.type) {
     case "link":
       return theme.dim("[link]");
     case "image":
-      return theme.dim("[image]");
+      return theme.dim(`[image${hashSuffix}]`);
     case "voice":
-      return theme.dim("[voice]");
+      return theme.dim(`[voice${hashSuffix}]`);
     case "video":
-      return theme.dim("[video]");
+      return theme.dim(`[video${hashSuffix}]`);
     case "file": {
       const filename = rawString(message.raw, "FileName") ?? rawString(message.raw, "FileNameTitle");
-      return theme.dim(filename ? `[file] ${filename}` : "[file]");
+      return theme.dim(filename ? `[file${hashSuffix}] ${filename}` : `[file${hashSuffix}]`);
     }
     case "mini-program":
       return theme.dim("[mini-program]");
     case "sticker":
-      return theme.dim("[sticker]");
+      return theme.dim(`[sticker${hashSuffix}]`);
     default:
       return theme.dim("[unsupported]");
   }

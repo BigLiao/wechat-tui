@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { existsSync, rmSync, readdirSync } from "node:fs";
+import { existsSync, writeFileSync, rmSync, readdirSync } from "node:fs";
 import { resolve, basename, extname, join } from "node:path";
 import { homedir } from "node:os";
 import type { Logger } from "pino";
@@ -20,6 +20,7 @@ import type {
   IncomingProtocolMessage,
   MessageInput,
   MessageKind,
+  MessageRecord,
   MessageStore,
   RenderState,
   UiEvent,
@@ -30,6 +31,9 @@ import type {
   WorkbenchRenderer
 } from "./types.js";
 import { conversationFromContact, localMessageId } from "./util/ids.js";
+import { FileRegistry } from "./util/file-hash.js";
+import { MediaCache, extensionFromContentType } from "./util/media-cache.js";
+import { openWithSystem, revealInFileManager } from "./util/open.js";
 
 export interface RuntimeOptions {
   initialHistoryLimit?: number;
@@ -59,6 +63,8 @@ export class WeChatRuntime extends EventEmitter {
   private activeAccountId?: string;
   private qr?: RenderState["qr"];
   private exiting = false;
+  private readonly fileRegistry = new FileRegistry();
+  private readonly mediaCache = new MediaCache();
 
   constructor(
     private readonly protocol: WeChatProtocol,
@@ -68,6 +74,7 @@ export class WeChatRuntime extends EventEmitter {
   ) {
     super();
     this.bindProtocol();
+    this.renderer.setFileRegistry?.(this.fileRegistry);
   }
 
   async start(): Promise<void> {
@@ -270,6 +277,7 @@ export class WeChatRuntime extends EventEmitter {
       this.chatInput = "";
       this.messageScrollOffset = 0;
       this.conversationFocus = "list";
+      this.fileRegistry.clear();
     }
   }
 
@@ -446,6 +454,11 @@ export class WeChatRuntime extends EventEmitter {
         } else {
           this.errorMessage = "usage: /send <file-path>";
         }
+        return;
+      }
+      case "/view": {
+        const hash = command.slice(name.length).trim();
+        this.viewFileByHash(hash);
         return;
       }
       case "/logout":
@@ -675,7 +688,7 @@ export class WeChatRuntime extends EventEmitter {
         content,
         type,
         timestamp: now,
-        raw: sent.raw
+        raw: { ...asObject(sent.raw), localFilePath: filePath }
       };
       const saved = this.store.saveMessage(message, conversationInputFromRecord(activeConversation), false);
       this.store.markRead(activeConversation.id);
@@ -743,6 +756,51 @@ export class WeChatRuntime extends EventEmitter {
       },
       "incoming message handled"
     );
+
+    // Auto-download media for non-public messages
+    if (!isPublic && isDownloadableType(scopedIncoming.type)) {
+      void this.downloadAndCacheMedia(incoming, saved);
+    }
+  }
+
+  private async downloadAndCacheMedia(incoming: IncomingProtocolMessage, saved: MessageRecord): Promise<void> {
+    try {
+      const result = await this.protocol.downloadMedia(incoming);
+      if (!result) {
+        this.options.logger?.debug(
+          { messageId: saved.id, type: saved.type, protocolMessageId: incoming.protocolMessageId },
+          "media download returned empty (no data or unsupported)"
+        );
+        return;
+      }
+
+      // Determine filename: prefer original name from raw, fall back to msgId-based name
+      const raw = asObject(incoming.raw);
+      const originalName = stringField(raw, "FileName") || stringField(raw, "FileNameTitle");
+      const ext = originalName
+        ? extname(originalName) || extensionFromContentType(result.contentType, saved.type)
+        : extensionFromContentType(result.contentType, saved.type);
+      const fileName = originalName
+        ? sanitizeFileName(originalName)
+        : `${saved.type}_${incoming.protocolMessageId ?? Date.now()}${ext}`;
+
+      const cachePath = this.mediaCache.filePathByName(saved.conversationId, fileName);
+      writeFileSync(cachePath, result.data);
+      this.fileRegistry.register(saved.conversationId, saved.id, cachePath);
+
+      // Persist localFilePath in the message raw so it survives restarts
+      const updatedRaw = { ...asObject(saved.raw), localFilePath: cachePath };
+      this.store.updateMessageRaw(saved.id, updatedRaw);
+
+      this.options.logger?.info(
+        { messageId: saved.id, type: saved.type, cachePath, size: result.data.length },
+        "media downloaded and cached"
+      );
+      // Re-render so the hash/path association is visible
+      this.render();
+    } catch (error) {
+      this.options.logger?.warn({ err: error, messageId: saved.id, type: saved.type }, "media download failed");
+    }
   }
 
   private render(): void {
@@ -923,6 +981,8 @@ export class WeChatRuntime extends EventEmitter {
     this.options.logger?.info("clearing app data (messages, contacts, logs)");
     this.store.clearData();
     this.clearLogFiles();
+    this.clearMediaCache();
+    this.fileRegistry.clear();
     this.statusMessage = "data cleared";
     this.render();
   }
@@ -941,6 +1001,45 @@ export class WeChatRuntime extends EventEmitter {
       }
     } catch {
       this.options.logger?.debug("failed to clear log directory");
+    }
+  }
+
+  private clearMediaCache(): void {
+    const cacheDir = this.mediaCache.baseDir;
+    try {
+      if (existsSync(cacheDir)) {
+        rmSync(cacheDir, { recursive: true, force: true });
+      }
+    } catch {
+      this.options.logger?.debug("failed to clear media cache directory");
+    }
+  }
+
+  private viewFileByHash(hash: string): void {
+    if (!hash) {
+      this.errorMessage = "usage: /view <hash>";
+      return;
+    }
+    // Strip leading '#' for convenience (user may type /view #a1c1 or /view a1c1)
+    const normalizedHash = hash.startsWith("#") ? hash.slice(1) : hash;
+    const filePath = this.fileRegistry.lookup(normalizedHash);
+    if (!filePath) {
+      this.errorMessage = `no file found for hash: ${normalizedHash}`;
+      return;
+    }
+    if (!existsSync(filePath)) {
+      this.errorMessage = `file no longer exists: ${filePath}`;
+      return;
+    }
+    const ext = extname(filePath).toLowerCase();
+    const isViewable = VIEWABLE_EXTENSIONS.has(ext);
+    this.options.logger?.info({ hash: normalizedHash, filePath, isViewable }, "opening file with system viewer");
+    if (isViewable) {
+      openWithSystem(filePath);
+      this.statusMessage = `opening: ${basename(filePath)}`;
+    } else {
+      revealInFileManager(filePath);
+      this.statusMessage = `revealing: ${basename(filePath)}`;
     }
   }
 
@@ -1048,10 +1147,36 @@ function resolveFilePath(rawPath: string): string {
 
 const IMAGE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp"]);
 const VIDEO_EXTENSIONS = new Set([".mp4", ".mov", ".avi", ".mkv", ".webm"]);
+const AUDIO_EXTENSIONS = new Set([".mp3", ".amr", ".ogg", ".silk", ".m4a", ".wav"]);
+
+/** Extensions that can be opened directly with a viewer (images, videos, audio) */
+const VIEWABLE_EXTENSIONS = new Set([...IMAGE_EXTENSIONS, ...VIDEO_EXTENSIONS, ...AUDIO_EXTENSIONS]);
 
 function detectFileMessageKind(filePath: string): MessageKind {
   const ext = extname(filePath).toLowerCase();
   if (IMAGE_EXTENSIONS.has(ext)) return "image";
   if (VIDEO_EXTENSIONS.has(ext)) return "video";
   return "file";
+}
+
+function asObject(value: unknown): Record<string, unknown> {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return value as Record<string, unknown>;
+  }
+  return {};
+}
+
+function stringField(obj: Record<string, unknown>, key: string): string | undefined {
+  const value = obj[key];
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function sanitizeFileName(name: string): string {
+  return name.replace(/[/:*?"<>|\\]/g, "_").slice(0, 128);
+}
+
+const DOWNLOADABLE_TYPES = new Set<string>(["image", "sticker", "video", "voice", "file"]);
+
+function isDownloadableType(type: MessageKind): boolean {
+  return DOWNLOADABLE_TYPES.has(type);
 }

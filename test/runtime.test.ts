@@ -64,6 +64,10 @@ class ContactsBeforeLoginProtocol extends EventEmitter implements WeChatProtocol
     return {};
   }
 
+  async downloadMedia(): Promise<undefined> {
+    return undefined;
+  }
+
   async getContacts(): Promise<ContactInput[]> {
     return this.contacts;
   }
@@ -107,6 +111,10 @@ class PublicConversationProtocol extends EventEmitter implements WeChatProtocol 
 
   async sendFile(): Promise<{ messageId?: string; raw?: unknown }> {
     return {};
+  }
+
+  async downloadMedia(): Promise<undefined> {
+    return undefined;
   }
 
   async getContacts(): Promise<ContactInput[]> {
