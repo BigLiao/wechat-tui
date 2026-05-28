@@ -4,6 +4,7 @@ import {
   ProcessTerminal,
   TUI,
   decodeKittyPrintable,
+  isKeyRelease,
   matchesKey,
   parseKey
 } from "@earendil-works/pi-tui";
@@ -14,6 +15,13 @@ import type { FileRegistry } from "../util/file-hash.js";
 
 const BRACKETED_PASTE_START = "\x1b[200~";
 const BRACKETED_PASTE_END = "\x1b[201~";
+const DUPLICATE_NAVIGATION_KEY_SUPPRESSION_MS = 25;
+const DEDUPED_KEY_NAMES = new Set(["up", "down", "left", "right", "return", "enter", "escape"]);
+
+interface LastKeyInput {
+  name: string;
+  at: number;
+}
 
 export class WorkbenchTerminalRenderer implements WorkbenchRenderer {
   private tui?: TUI;
@@ -21,6 +29,7 @@ export class WorkbenchTerminalRenderer implements WorkbenchRenderer {
   private removeInputListener?: () => void;
   private closeHandler?: () => void;
   private fileRegistry?: FileRegistry;
+  private lastKeyInput?: LastKeyInput;
 
   constructor(private readonly terminal: Terminal = new ProcessTerminal()) {}
 
@@ -48,6 +57,9 @@ export class WorkbenchTerminalRenderer implements WorkbenchRenderer {
       const key = rawInputToKey(data);
       if (!key) {
         return undefined;
+      }
+      if (this.shouldSuppressDuplicateKey(key)) {
+        return { consume: true };
       }
 
       // Show command panel when `/` is pressed on chats view
@@ -88,6 +100,7 @@ export class WorkbenchTerminalRenderer implements WorkbenchRenderer {
     this.tui?.stop();
     this.tui = undefined;
     this.app = undefined;
+    this.lastKeyInput = undefined;
   }
 
   render(state: RenderState): void {
@@ -96,6 +109,20 @@ export class WorkbenchTerminalRenderer implements WorkbenchRenderer {
     }
     this.app.setState(state);
     this.tui.requestRender();
+  }
+
+  private shouldSuppressDuplicateKey(key: UiKey): boolean {
+    const name = key.name;
+    if (!name || !DEDUPED_KEY_NAMES.has(name)) {
+      this.lastKeyInput = undefined;
+      return false;
+    }
+
+    const now = Date.now();
+    const shouldSuppress =
+      this.lastKeyInput?.name === name && now - this.lastKeyInput.at <= DUPLICATE_NAVIGATION_KEY_SUPPRESSION_MS;
+    this.lastKeyInput = { name, at: now };
+    return shouldSuppress;
   }
 }
 
@@ -108,6 +135,10 @@ export function renderState(state: RenderState, options: { width?: number; rows?
 }
 
 function rawInputToKey(data: string): UiKey | undefined {
+  if (isKeyRelease(data)) {
+    return undefined;
+  }
+
   if (matchesKey(data, Key.ctrl("c"))) {
     return { sequence: data, name: "c", ctrl: true };
   }

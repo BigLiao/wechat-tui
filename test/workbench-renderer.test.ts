@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { CURSOR_MARKER } from "@earendil-works/pi-tui";
-import { renderState } from "../src/ui/workbench-renderer.js";
+import type { Terminal } from "@earendil-works/pi-tui";
+import { WorkbenchTerminalRenderer, renderState } from "../src/ui/workbench-renderer.js";
 import { MessageList } from "../src/tui/components/message-list.js";
-import type { RenderState } from "../src/types.js";
+import type { RenderState, UiEvent } from "../src/types.js";
 
 function stripAnsi(input: string): string {
   return input.replace(/\x1b\[[0-9;]*m/g, "");
@@ -30,6 +31,55 @@ function baseState(overrides: Partial<RenderState>): RenderState {
 }
 
 describe("WorkbenchTerminalRenderer", () => {
+  it("ignores Kitty key release events before they reach runtime handlers", () => {
+    const terminal = new InputTerminal();
+    const events: UiEvent[] = [];
+    const renderer = new WorkbenchTerminalRenderer(terminal);
+
+    renderer.start((event) => events.push(event), () => {});
+    terminal.send("\x1b[1;1:1A");
+    terminal.send("\x1b[1;1:3A");
+    renderer.stop();
+
+    expect(events).toEqual([{ type: "key", key: { sequence: "\x1b[1;1:1A", name: "up" } }]);
+  });
+
+  it("suppresses immediate duplicate navigation keys before SelectList handles them", () => {
+    const terminal = new InputTerminal();
+    const events: UiEvent[] = [];
+    const renderer = new WorkbenchTerminalRenderer(terminal);
+
+    renderer.start((event) => events.push(event), () => {});
+    renderer.render(
+      baseState({
+        conversations: [
+          {
+            id: "conversation:alpha",
+            protocolId: "@alpha",
+            kind: "private",
+            title: "Alpha",
+            unreadCount: 0,
+            updatedAt: 1_700_000_000_000
+          },
+          {
+            id: "conversation:beta",
+            protocolId: "@beta",
+            kind: "private",
+            title: "Beta",
+            unreadCount: 0,
+            updatedAt: 1_700_000_000_001
+          }
+        ]
+      })
+    );
+
+    terminal.send("\x1b[B");
+    terminal.send("\x1b[B");
+    renderer.stop();
+
+    expect(events).toEqual([{ type: "conversation-select", index: 1 }]);
+  });
+
   it("renders recent conversations with unread and group sender preview", () => {
     const output = renderState(
       baseState({
@@ -287,3 +337,30 @@ describe("WorkbenchTerminalRenderer", () => {
     expect(older).not.toContain("msg 8");
   });
 });
+
+class InputTerminal implements Terminal {
+  readonly columns = 80;
+  readonly rows = 24;
+  readonly kittyProtocolActive = true;
+  private input?: (data: string) => void;
+
+  start(onInput: (data: string) => void): void {
+    this.input = onInput;
+  }
+  stop(): void {
+    this.input = undefined;
+  }
+  async drainInput(): Promise<void> {}
+  send(data: string): void {
+    this.input?.(data);
+  }
+  write(): void {}
+  moveBy(): void {}
+  hideCursor(): void {}
+  showCursor(): void {}
+  clearLine(): void {}
+  clearFromCursor(): void {}
+  clearScreen(): void {}
+  setTitle(): void {}
+  setProgress(): void {}
+}

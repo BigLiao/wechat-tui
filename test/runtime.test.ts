@@ -364,6 +364,27 @@ describe("WeChatRuntime", () => {
     store.close();
   });
 
+  it("ignores a duplicate enter immediately after opening contact search", async () => {
+    const store = new SqliteStore(tempDb());
+    const protocol = new MockProtocol();
+    const renderer = new FakeRenderer();
+    const runtime = new WeChatRuntime(protocol, store, renderer, { initialHistoryLimit: 10 });
+
+    await runtime.start();
+    await runtime.handleUiEvent({ type: "conversation-open" });
+    expect(renderer.latest.view).toBe("search");
+
+    await runtime.handleKey(key.enter());
+    expect(renderer.latest.view).toBe("search");
+    expect(renderer.latest.activeConversation).toBeUndefined();
+
+    await pressText(runtime, "Boss");
+    await runtime.handleKey(key.enter());
+    expect(renderer.latest.view).toBe("chat");
+    expect(renderer.latest.activeConversation?.title).toBe("Boss");
+    store.close();
+  });
+
   it("opens the conversation selected by the pi-tui SelectList event", async () => {
     const store = new SqliteStore(tempDb());
     const protocol = new MockProtocol();

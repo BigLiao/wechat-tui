@@ -45,6 +45,8 @@ export interface RuntimeOptions {
   updateCheck?: () => Promise<UpdateInfo | undefined>;
 }
 
+const SEARCH_ENTER_SUPPRESSION_MS = 100;
+
 export class WeChatRuntime extends EventEmitter {
   private view: AppView = "login";
   private previousView: AppView = "chats";
@@ -65,6 +67,7 @@ export class WeChatRuntime extends EventEmitter {
   private qr?: RenderState["qr"];
   private exiting = false;
   private contactSnapshotApplied = false;
+  private suppressSearchEnterUntil = 0;
   private readonly fileRegistry = new FileRegistry();
   private readonly mediaCache = new MediaCache();
 
@@ -412,6 +415,10 @@ export class WeChatRuntime extends EventEmitter {
   }
 
   private async handleSearchKey(key: UiKey): Promise<void> {
+    const shouldIgnoreEnter = isEnterKey(key) && Date.now() < this.suppressSearchEnterUntil;
+    if (!isEnterKey(key)) {
+      this.suppressSearchEnterUntil = 0;
+    }
     if (isEscapeKey(key)) {
       this.view = this.previousView === "chat" && this.activeConversationId ? "chat" : "chats";
       this.conversationFocus = "list";
@@ -427,6 +434,11 @@ export class WeChatRuntime extends EventEmitter {
       return;
     }
     if (isEnterKey(key)) {
+      if (shouldIgnoreEnter) {
+        this.suppressSearchEnterUntil = 0;
+        return;
+      }
+      this.suppressSearchEnterUntil = 0;
       this.openSelectedSearchResult();
       return;
     }
@@ -561,6 +573,7 @@ export class WeChatRuntime extends EventEmitter {
     this.view = "search";
     this.searchKeyword = "";
     this.selectedSearchIndex = 0;
+    this.suppressSearchEnterUntil = Date.now() + SEARCH_ENTER_SUPPRESSION_MS;
     this.statusMessage = "search contacts and groups";
   }
 
