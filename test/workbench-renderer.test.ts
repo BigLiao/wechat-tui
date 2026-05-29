@@ -3,6 +3,8 @@ import { CURSOR_MARKER } from "@earendil-works/pi-tui";
 import type { Terminal } from "@earendil-works/pi-tui";
 import { WorkbenchTerminalRenderer, renderState } from "../src/ui/workbench-renderer.js";
 import { MessageList } from "../src/tui/components/message-list.js";
+import { CommandPanel } from "../src/tui/components/command-panel.js";
+import { ConfirmPanel } from "../src/tui/components/confirm-panel.js";
 import type { RenderState, UiEvent } from "../src/types.js";
 
 function stripAnsi(input: string): string {
@@ -123,6 +125,22 @@ describe("WorkbenchTerminalRenderer", () => {
     expect(plain).toContain("Update available");
     expect(plain).toContain("0.1.1 -> 0.1.2");
     expect(plain).toContain("npm install -g wechat-tui@latest");
+  });
+
+  it("renders home overlays as separated panels", () => {
+    const commands = new CommandPanel().render(80);
+    const confirm = new ConfirmPanel().render(80);
+    const commandPlain = stripAnsi(commands.join("\n"));
+    const confirmPlain = stripAnsi(confirm.join("\n"));
+
+    expect(commands[0]?.trim()).toBe("");
+    expect(commands.at(-1)?.trim()).toBe("");
+    expect(commandPlain).toContain("Commands");
+    expect(commandPlain).toContain("/contacts");
+    expect(confirm[0]?.trim()).toBe("");
+    expect(confirm.at(-1)?.trim()).toBe("");
+    expect(confirmPlain).toContain("Confirm");
+    expect(confirmPlain).toContain("Yes, clear data");
   });
 
   it("truncates conversation previews to twenty-four columns", () => {

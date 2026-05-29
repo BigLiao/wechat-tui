@@ -1,6 +1,6 @@
 import { SelectList } from "@earendil-works/pi-tui";
 import type { SelectItem, SelectListTheme, Component } from "@earendil-works/pi-tui";
-import { theme } from "../theme.js";
+import { theme, fit } from "../theme.js";
 
 const CONFIRM_ITEMS: SelectItem[] = [
   { value: "confirm", label: "Yes, clear data", description: "Delete messages, contacts, and logs" },
@@ -46,6 +46,8 @@ export class ConfirmPanel implements Component {
   }
 
   render(width: number): string[] {
-    return this.focusTarget.render(width);
+    const itemWidth = Math.max(1, width - 2);
+    const items = this.focusTarget.render(itemWidth).map((line) => fit(`  ${line}`, width));
+    return [fit("", width, true), fit(`  ${theme.warning("Confirm")}`, width), ...items, fit("", width, true)];
   }
 }
