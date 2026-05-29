@@ -23,6 +23,7 @@ import {
   summarizeStoredMessage
 } from "../logging.js";
 import { loadNodeSqlite } from "../util/node-sqlite.js";
+import { cleanText } from "../util/text.js";
 
 interface ContactRow {
   account_id: string | null;
@@ -244,6 +245,7 @@ export class SqliteStore implements MessageStore {
     }
     this.backfillConversationTitlesFromContact(saved);
     this.backfillSenderNameFromContact(saved);
+    this.backfillGroupMemberSenderNamesFromContact(saved);
     this.options.logger?.trace(
       {
         id: saved.id,
@@ -756,6 +758,57 @@ export class SqliteStore implements MessageStore {
     }
   }
 
+  private backfillGroupMemberSenderNamesFromContact(contact: ContactRecord): void {
+    const accountId = this.currentAccountId();
+    if (!accountId || contact.kind !== "group" || !contact.protocolId) {
+      return;
+    }
+
+    const members = groupMembersWithUsefulNames(contact.raw);
+    if (members.length === 0) {
+      return;
+    }
+
+    const senderIdsSql = "SELECT id FROM contacts WHERE account_id = ? AND protocol_id = ?";
+    let changedMessages = 0;
+    for (const member of members) {
+      const result = this.db
+        .prepare(
+          "UPDATE messages SET sender_name = ? WHERE account_id = ? " +
+            `AND ${unhelpfulNameSql("sender_name")} ` +
+            `AND sender_id IN (${senderIdsSql}) ` +
+            "AND conversation_id IN (" +
+            "SELECT id FROM conversations WHERE account_id = ? AND kind = 'group' AND protocol_id = ?" +
+            ")"
+        )
+        .run(member.displayName, accountId, accountId, member.protocolId, accountId, contact.protocolId);
+      changedMessages += Number(result.changes);
+
+      this.db
+        .prepare(
+          "UPDATE conversations SET last_message_sender_name = ? WHERE account_id = ? " +
+            `AND ${unhelpfulNameSql("last_message_sender_name")} ` +
+            "AND kind = 'group' AND protocol_id = ? " +
+            "AND (" +
+            "SELECT sender_id FROM messages WHERE account_id = conversations.account_id AND conversation_id = conversations.id " +
+            "ORDER BY timestamp DESC, created_at DESC LIMIT 1" +
+            `) IN (${senderIdsSql})`
+        )
+        .run(member.displayName, accountId, contact.protocolId, accountId, member.protocolId);
+    }
+
+    if (changedMessages > 0) {
+      this.options.logger?.debug(
+        {
+          groupProtocolId: contact.protocolId,
+          changedMessages,
+          memberCount: members.length
+        },
+        "backfilled group message sender names from member list"
+      );
+    }
+  }
+
   private foldPrivateConversationsByActiveContacts(
     accountId: string,
     conversations: ConversationRecord[]
@@ -1077,10 +1130,12 @@ function senderIdsForContactSql(): string {
 }
 
 function stabilizeContactForUpsert(contact: ContactInput, existing: ContactRecord | undefined): ContactInput {
+  const raw = contact.raw ?? existing?.raw;
   if (!existing || isUsefulSenderName(contact.displayName) || !isUsefulSenderName(existing.displayName)) {
     return {
       ...contact,
-      protocolId: contact.protocolId ?? existing?.protocolId
+      protocolId: contact.protocolId ?? existing?.protocolId,
+      raw
     };
   }
 
@@ -1091,8 +1146,68 @@ function stabilizeContactForUpsert(contact: ContactInput, existing: ContactRecor
     remarkName: contact.remarkName ?? existing.remarkName,
     nickName: contact.nickName ?? existing.nickName,
     alias: contact.alias ?? existing.alias,
-    raw: existing.raw ?? contact.raw
+    raw
   };
+}
+
+interface UsefulGroupMember {
+  protocolId: string;
+  displayName: string;
+}
+
+function groupMembersWithUsefulNames(raw: unknown): UsefulGroupMember[] {
+  if (!raw || typeof raw !== "object") {
+    return [];
+  }
+  const memberList = (raw as { MemberList?: unknown }).MemberList;
+  if (!Array.isArray(memberList)) {
+    return [];
+  }
+
+  const members: UsefulGroupMember[] = [];
+  const seen = new Set<string>();
+  for (const member of memberList) {
+    if (!member || typeof member !== "object") {
+      continue;
+    }
+    const record = member as Record<string, unknown>;
+    const protocolId = cleanGroupMemberProtocolId(record.UserName);
+    if (!protocolId || seen.has(protocolId)) {
+      continue;
+    }
+    const displayName = firstUsefulGroupMemberName(
+      record.RemarkName,
+      record.DisplayName,
+      record.NickName,
+      record.Alias
+    );
+    if (!displayName) {
+      continue;
+    }
+    seen.add(protocolId);
+    members.push({ protocolId, displayName });
+  }
+  return members;
+}
+
+function cleanGroupMemberProtocolId(value: unknown): string | undefined {
+  const protocolId = typeof value === "string" ? value.trim() : "";
+  return protocolId.startsWith("@") && !protocolId.startsWith("@@") ? protocolId : undefined;
+}
+
+function firstUsefulGroupMemberName(...values: unknown[]): string | undefined {
+  for (const value of values) {
+    const displayName = cleanGroupMemberName(value);
+    if (isUsefulSenderName(displayName)) {
+      return displayName;
+    }
+  }
+  return undefined;
+}
+
+function cleanGroupMemberName(value: unknown): string | undefined {
+  const displayName = cleanText(value).replace(/^\[群\]\s*/, "");
+  return displayName || undefined;
 }
 
 function sameLazyMergeContact(left: ContactRecord, right: ContactRecord): boolean {

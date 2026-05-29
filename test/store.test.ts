@@ -239,6 +239,111 @@ describe("SqliteStore", () => {
     store.close();
   });
 
+  it("backfills group sender names from updated group member metadata", () => {
+    const store = new SqliteStore(tempDb());
+    store.setActiveAccount(accountA);
+    const aliceId = contactId("private", ["@alice"]);
+    const sparseContact: ContactInput = {
+      id: aliceId,
+      protocolId: "@alice",
+      kind: "private",
+      displayName: "Group member"
+    };
+    const group: ContactInput = {
+      id: contactId("group", ["project"]),
+      protocolId: "@@project",
+      kind: "group",
+      displayName: "Project"
+    };
+    const otherGroup: ContactInput = {
+      id: contactId("group", ["other"]),
+      protocolId: "@@other",
+      kind: "group",
+      displayName: "Other"
+    };
+    const conversation = conversationFromContact(group);
+    const otherConversation = conversationFromContact(otherGroup);
+
+    store.upsertContact(sparseContact);
+    store.saveMessage(
+      {
+        id: localMessageId([conversation.id, aliceId, "project message"]),
+        conversationId: conversation.id,
+        senderId: aliceId,
+        senderName: "Group member",
+        isSelf: false,
+        content: "project message",
+        type: "text",
+        timestamp: 1_700_000_000_000
+      },
+      conversation,
+      true
+    );
+    store.saveMessage(
+      {
+        id: localMessageId([otherConversation.id, aliceId, "other message"]),
+        conversationId: otherConversation.id,
+        senderId: aliceId,
+        senderName: "Group member",
+        isSelf: false,
+        content: "other message",
+        type: "text",
+        timestamp: 1_700_000_100_000
+      },
+      otherConversation,
+      true
+    );
+
+    store.upsertContact({
+      ...group,
+      raw: {
+        UserName: "@@project",
+        MemberList: [
+          {
+            UserName: "@alice",
+            DisplayName: "Alice in Project",
+            NickName: "Alice"
+          }
+        ]
+      }
+    });
+
+    expect(store.listMessages(conversation.id)[0]?.senderName).toBe("Alice in Project");
+    expect(store.findConversationById(conversation.id)?.lastMessageSenderName).toBe("Alice in Project");
+    expect(store.listMessages(otherConversation.id)[0]?.senderName).toBe("Group member");
+    expect(store.findConversationById(otherConversation.id)?.lastMessageSenderName).toBe("Group member");
+    store.close();
+  });
+
+  it("preserves existing contact raw metadata when a later sparse upsert has no raw", () => {
+    const store = new SqliteStore(tempDb());
+    store.setActiveAccount(accountA);
+    const group: ContactInput = {
+      id: contactId("group", ["project"]),
+      protocolId: "@@project",
+      kind: "group",
+      displayName: "Project",
+      raw: {
+        UserName: "@@project",
+        MemberList: [
+          {
+            UserName: "@alice",
+            DisplayName: "Alice"
+          }
+        ]
+      }
+    };
+
+    store.upsertContact(group);
+    const saved = store.upsertContact({
+      ...group,
+      raw: undefined
+    });
+
+    expect((saved.raw as { MemberList?: unknown[] } | undefined)?.MemberList).toHaveLength(1);
+    store.close();
+  });
+
   it("keeps a useful contact name when a later sparse update arrives for the same id", () => {
     const store = new SqliteStore(tempDb());
     store.setActiveAccount(accountA);
