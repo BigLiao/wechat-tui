@@ -50,6 +50,9 @@ const bot = {
   }
 };
 
+const recallXml =
+  '<sysmsg type="revokemsg"><revokemsg><session>wxid_1bl0merbg3se12</session><oldmsgid>1455598372</oldmsgid><msgid>6545152177546939934</msgid><replacemsg><![CDATA["一号测试" 撤回了一条消息]]></replacemsg></revokemsg></sysmsg>';
+
 describe("normalizeWechat4uMessage", () => {
   it("drops Web WeChat status notify messages", () => {
     const message = normalizeWechat4uMessage(
@@ -312,6 +315,42 @@ describe("normalizeWechat4uMessage", () => {
 
     expect(message?.type).toBe("notice");
     expect(message?.content).toBe("[contact-card] Card Friend");
+  });
+
+  it("renders recalled messages from the protocol replacement text", () => {
+    const message = normalizeWechat4uMessage(
+      {
+        MsgId: "recall-1",
+        FromUserName: "@friend",
+        ToUserName: "@me",
+        MsgType: 10002,
+        Content: recallXml,
+        CreateTime: 1_700_000_000
+      },
+      bot
+    );
+
+    expect(message?.type).toBe("notice");
+    expect(message?.content).toBe('"一号测试" 撤回了一条消息');
+    expect(message?.content).not.toContain("wxid_1bl0merbg3se12");
+    expect(message?.content).not.toContain("6545152177546939934");
+  });
+
+  it("recognizes recalled payloads carried by system messages", () => {
+    const message = normalizeWechat4uMessage(
+      {
+        MsgId: "recall-2",
+        FromUserName: "@friend",
+        ToUserName: "@me",
+        MsgType: 10000,
+        Content: recallXml,
+        CreateTime: 1_700_000_000
+      },
+      bot
+    );
+
+    expect(message?.type).toBe("notice");
+    expect(message?.content).toBe('"一号测试" 撤回了一条消息');
   });
 
   it("uses group member metadata even when getDisplayName returns an empty string", () => {

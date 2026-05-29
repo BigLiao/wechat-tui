@@ -252,6 +252,44 @@ describe("WorkbenchTerminalRenderer", () => {
     expect(output).not.toContain("<xml />");
   });
 
+  it("renders stored recalled notices from raw protocol data", () => {
+    const output = renderState(
+      baseState({
+        view: "chat",
+        activeConversation: {
+          id: "conversation:one",
+          protocolId: "@one",
+          kind: "private",
+          title: "一号测试",
+          unreadCount: 0,
+          updatedAt: 1_700_000_000_000
+        },
+        messages: [
+          {
+            id: "message:1",
+            conversationId: "conversation:one",
+            senderName: "一号测试",
+            isSelf: false,
+            content: "wxid_1bl0merbg3se12\n\t\t1455598372\n\t\t6545152177546939934",
+            type: "notice",
+            timestamp: 1_700_000_000_000,
+            createdAt: 1_700_000_000_000,
+            raw: {
+              MsgType: 10002,
+              Content:
+                '<sysmsg type="revokemsg"><revokemsg><session>wxid_1bl0merbg3se12</session><oldmsgid>1455598372</oldmsgid><msgid>6545152177546939934</msgid><replacemsg><![CDATA["一号测试" 撤回了一条消息]]></replacemsg></revokemsg></sysmsg>'
+            }
+          }
+        ]
+      })
+    );
+
+    const plain = stripAnsi(output);
+    expect(plain).toContain('"一号测试" 撤回了一条消息');
+    expect(plain).not.toContain("wxid_1bl0merbg3se12");
+    expect(plain).not.toContain("6545152177546939934");
+  });
+
   it("renders sparse group message senders with a readable fallback", () => {
     const output = renderState(
       baseState({

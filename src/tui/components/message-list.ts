@@ -1,6 +1,7 @@
 import { wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { theme, fit } from "../theme.js";
 import { formatClock } from "../../util/time.js";
+import { formatWechatRecallMessage } from "../../util/wechat-recall.js";
 import type { ConversationRecord, MessageRecord, RenderState } from "../../types.js";
 import type { FileRegistry } from "../../util/file-hash.js";
 
@@ -77,10 +78,11 @@ function readableGroupSenderName(input: string | undefined): string {
 function messageDisplayContent(message: MessageRecord, conversation: ConversationRecord, fileRegistry?: FileRegistry): string {
   switch (message.type) {
     case "text":
-    case "notice":
     case "link":
     case "mini-program":
       return message.content || placeholderForMessage(message, conversation, fileRegistry);
+    case "notice":
+      return formatWechatRecallMessage(message.raw) || message.content || placeholderForMessage(message, conversation, fileRegistry);
     case "file":
       // File messages always go through placeholder to ensure hash is appended
       if (message.content) {

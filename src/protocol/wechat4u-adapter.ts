@@ -16,6 +16,7 @@ import type {
 } from "../types.js";
 import { contactId, conversationFromContact, localMessageId } from "../util/ids.js";
 import { cleanText, decodeHtml } from "../util/text.js";
+import { formatWechatRecallMessage } from "../util/wechat-recall.js";
 import { preview, summarizeContacts, summarizeIncomingMessage, summarizeRawWechatMessage } from "../logging.js";
 
 const require = createRequire(import.meta.url);
@@ -647,7 +648,7 @@ function messageContentForKind(
     case "text":
       return parsedContent.content || placeholderForMessageKind(type, raw);
     case "notice":
-      return parsedContent.content || formatNoticeMessage(raw, conversationContact, isSelf) || placeholderForMessageKind(type, raw);
+      return formatNoticeMessage(raw, conversationContact, isSelf) || parsedContent.content || placeholderForMessageKind(type, raw);
     case "link":
     case "mini-program":
     case "file":
@@ -711,15 +712,17 @@ function formatAppMessage(
 }
 
 function formatNoticeMessage(raw: RawMessage, conversationContact: ContactInput, isSelf: boolean): string {
+  const recall = formatWechatRecallMessage(raw);
+  if (recall) {
+    return recall;
+  }
+
   const messageType = Number(raw.MsgType);
   if (messageType === 48) {
     return formatLocationMessage(raw, conversationContact, isSelf);
   }
   if (messageType === 42) {
     return formatContactCardMessage(raw);
-  }
-  if (messageType === 10002) {
-    return "[recalled]";
   }
   if (messageType === 49) {
     const app = parseAppMessage(raw, conversationContact, isSelf);
