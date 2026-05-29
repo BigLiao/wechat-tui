@@ -36,7 +36,12 @@ export class MockProtocol extends EventEmitter implements WeChatProtocol {
         id: contactId("group", ["project-a"]),
         protocolId: "@@project-a",
         kind: "group",
-        displayName: "Project A"
+        displayName: "Project A",
+        raw: {
+          UserName: "@@project-a",
+          MemberCount: 1,
+          MemberList: [{ UserName: "@mock-member", DisplayName: "Mock Member" }]
+        }
       }
     ];
   }

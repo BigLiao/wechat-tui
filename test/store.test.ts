@@ -468,6 +468,111 @@ describe("SqliteStore", () => {
     store.close();
   });
 
+  it("lazily merges stale group conversations into the current group conversation", () => {
+    const store = new SqliteStore(tempDb());
+    store.setActiveAccount(accountA);
+    const staleGroup: ContactInput = {
+      id: contactId("group", ["@@old-group"]),
+      protocolId: "@@old-group",
+      kind: "group",
+      displayName: "Project Group",
+      raw: { UserName: "@@old-group", MemberCount: 3 }
+    };
+    const currentGroup: ContactInput = {
+      ...staleGroup,
+      id: contactId("group", ["@@new-group"]),
+      protocolId: "@@new-group",
+      raw: { UserName: "@@new-group", MemberCount: 3 }
+    };
+    const sender: ContactInput = {
+      id: contactId("private", ["@member"]),
+      protocolId: "@member",
+      kind: "private",
+      displayName: "Member"
+    };
+    const staleConversation = conversationFromContact(staleGroup);
+
+    store.upsertContact(staleGroup);
+    store.upsertContact(sender);
+    store.saveMessage(
+      {
+        id: localMessageId([staleConversation.id, "old group"]),
+        conversationId: staleConversation.id,
+        senderId: sender.id,
+        senderName: "Member",
+        isSelf: false,
+        content: "old group message",
+        type: "text",
+        timestamp: 1_700_000_000_000
+      },
+      staleConversation,
+      true
+    );
+
+    store.markAllContactsStale();
+    const current = store.upsertContact(currentGroup);
+    const currentConversation = store.upsertConversation(conversationFromContact(currentGroup));
+    const merged = store.mergeStaleConversationForContact(current, currentConversation);
+
+    expect(merged.id).toBe(currentConversation.id);
+    expect(merged.protocolId).toBe("@@new-group");
+    expect(merged.lastMessagePreview).toBe("old group message");
+    expect(store.findConversationById(staleConversation.id)).toBeUndefined();
+    expect(store.listRecentConversations().filter((conversation) => conversation.title === "Project Group")).toHaveLength(1);
+    expect(store.listMessages(staleConversation.id)).toHaveLength(0);
+    const messages = store.listMessages(currentConversation.id);
+    expect(messages).toHaveLength(1);
+    expect(messages[0]?.senderId).toBe(sender.id);
+    expect(store.totalUnreadCount()).toBe(1);
+    store.close();
+  });
+
+  it("does not merge stale group conversations when member counts differ", () => {
+    const store = new SqliteStore(tempDb());
+    store.setActiveAccount(accountA);
+    const staleGroup: ContactInput = {
+      id: contactId("group", ["@@old-count-group"]),
+      protocolId: "@@old-count-group",
+      kind: "group",
+      displayName: "Counted Group",
+      raw: { UserName: "@@old-count-group", MemberCount: 3 }
+    };
+    const currentGroup: ContactInput = {
+      ...staleGroup,
+      id: contactId("group", ["@@new-count-group"]),
+      protocolId: "@@new-count-group",
+      raw: { UserName: "@@new-count-group", MemberCount: 4 }
+    };
+    const staleConversation = conversationFromContact(staleGroup);
+    const currentConversationInput = conversationFromContact(currentGroup);
+
+    store.upsertContact(staleGroup);
+    store.saveMessage(
+      {
+        id: localMessageId([staleConversation.id, "old counted group"]),
+        conversationId: staleConversation.id,
+        senderId: contactId("private", ["@count-member"]),
+        senderName: "Count Member",
+        isSelf: false,
+        content: "old counted group",
+        type: "text",
+        timestamp: 1_700_000_000_000
+      },
+      staleConversation,
+      true
+    );
+
+    store.markAllContactsStale();
+    const current = store.upsertContact(currentGroup);
+    const currentConversation = store.upsertConversation(currentConversationInput);
+    const merged = store.mergeStaleConversationForContact(current, currentConversation);
+
+    expect(merged.id).toBe(currentConversation.id);
+    expect(store.findConversationById(staleConversation.id)).toBeDefined();
+    expect(store.listRecentConversations().filter((conversation) => conversation.title === "Counted Group")).toHaveLength(2);
+    store.close();
+  });
+
   it("folds stale private conversations in recent and unread lists", () => {
     const store = new SqliteStore(tempDb());
     store.setActiveAccount(accountA);
@@ -525,6 +630,66 @@ describe("SqliteStore", () => {
     expect(recent[0]?.unreadCount).toBe(2);
     expect(recent[0]?.lastMessagePreview).toBe("new folded");
     expect(store.listUnreadConversations().filter((conversation) => conversation.title === "Folded Friend")).toHaveLength(1);
+    store.close();
+  });
+
+  it("folds stale group conversations in recent and unread lists", () => {
+    const store = new SqliteStore(tempDb());
+    store.setActiveAccount(accountA);
+    const staleGroup: ContactInput = {
+      id: contactId("group", ["@@old-folded-group"]),
+      protocolId: "@@old-folded-group",
+      kind: "group",
+      displayName: "Folded Group",
+      raw: { UserName: "@@old-folded-group", MemberCount: 4 }
+    };
+    const currentGroup: ContactInput = {
+      ...staleGroup,
+      id: contactId("group", ["@@new-folded-group"]),
+      protocolId: "@@new-folded-group",
+      raw: { UserName: "@@new-folded-group", MemberCount: 4 }
+    };
+    const staleConversation = conversationFromContact(staleGroup);
+    const currentConversation = conversationFromContact(currentGroup);
+
+    store.upsertContact(staleGroup);
+    store.saveMessage(
+      {
+        id: localMessageId([staleConversation.id, "old group folded"]),
+        conversationId: staleConversation.id,
+        senderId: contactId("private", ["@old-member"]),
+        senderName: "Old Member",
+        isSelf: false,
+        content: "old group folded",
+        type: "text",
+        timestamp: 1_700_000_000_000
+      },
+      staleConversation,
+      true
+    );
+    store.markAllContactsStale();
+    store.upsertContact(currentGroup);
+    store.saveMessage(
+      {
+        id: localMessageId([currentConversation.id, "new group folded"]),
+        conversationId: currentConversation.id,
+        senderId: contactId("private", ["@new-member"]),
+        senderName: "New Member",
+        isSelf: false,
+        content: "new group folded",
+        type: "text",
+        timestamp: 1_700_000_100_000
+      },
+      currentConversation,
+      true
+    );
+
+    const recent = store.listRecentConversations().filter((conversation) => conversation.title === "Folded Group");
+    expect(recent).toHaveLength(1);
+    expect(recent[0]?.id).toBe(currentConversation.id);
+    expect(recent[0]?.unreadCount).toBe(2);
+    expect(recent[0]?.lastMessagePreview).toBe("new group folded");
+    expect(store.listUnreadConversations().filter((conversation) => conversation.title === "Folded Group")).toHaveLength(1);
     store.close();
   });
 

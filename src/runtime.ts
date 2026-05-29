@@ -586,7 +586,7 @@ export class WeChatRuntime extends EventEmitter {
   }
 
   private currentContactForConversation(conversation: ConversationRecord): ContactRecord | undefined {
-    if (conversation.kind !== "private") {
+    if (conversation.kind !== "private" && conversation.kind !== "group") {
       return undefined;
     }
     const contact = this.store.findContactByName(conversation.title);

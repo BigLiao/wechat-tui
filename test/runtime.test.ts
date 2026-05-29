@@ -486,6 +486,47 @@ describe("WeChatRuntime", () => {
     store.close();
   });
 
+  it("opens stale group conversations through the current group contact conversation", async () => {
+    const store = new SqliteStore(tempDb());
+    const protocol = new MockProtocol();
+    const renderer = new FakeRenderer();
+    const staleContact: ContactInput = {
+      id: contactId("group", ["old-project-a-list"]),
+      protocolId: "@@old-project-a-list",
+      kind: "group",
+      displayName: "Project A",
+      raw: { UserName: "@@old-project-a-list", MemberCount: 1 }
+    };
+    const staleConversation = conversationFromContact(staleContact);
+
+    store.setActiveAccount(protocol.getCurrentUser());
+    store.upsertContact(staleContact);
+    store.saveMessage(
+      {
+        id: localMessageId([staleConversation.id, "old group list history"]),
+        conversationId: staleConversation.id,
+        senderId: contactId("private", ["@group-member"]),
+        senderName: "Mock Member",
+        isSelf: false,
+        content: "old group list history",
+        type: "text",
+        timestamp: 1_700_000_000_000
+      },
+      staleConversation,
+      true
+    );
+
+    const runtime = new WeChatRuntime(protocol, store, renderer, { initialHistoryLimit: 10 });
+    await runtime.start();
+    await runtime.handleKey(key.enter());
+
+    expect(renderer.latest.view).toBe("chat");
+    expect(renderer.latest.activeConversation?.protocolId).toBe("@@project-a");
+    expect(renderer.latest.messages.map((message) => message.content)).toContain("old group list history");
+    expect(store.findConversationById(staleConversation.id)).toBeUndefined();
+    store.close();
+  });
+
   it("merges stale conversations when a current contact message arrives", async () => {
     const store = new SqliteStore(tempDb());
     const protocol = new MockProtocol();
