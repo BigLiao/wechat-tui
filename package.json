@@ -1,6 +1,6 @@
 {
   "name": "wechat-tui",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "description": "A terminal client for WeChat.",
   "type": "module",
   "repository": {
@@ -9,7 +9,8 @@
   },
   "files": [
     "dist",
-    "README.md"
+    "README.md",
+    "CHANGELOG.md"
   ],
   "bin": {
     "wechat-tui": "dist/index.js"
