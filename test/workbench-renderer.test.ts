@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { CURSOR_MARKER } from "@earendil-works/pi-tui";
 import type { Terminal } from "@earendil-works/pi-tui";
 import { WorkbenchTerminalRenderer, renderState } from "../src/ui/workbench-renderer.js";
@@ -33,6 +33,10 @@ function baseState(overrides: Partial<RenderState>): RenderState {
 }
 
 describe("WorkbenchTerminalRenderer", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("ignores Kitty key release events before they reach runtime handlers", () => {
     const terminal = new InputTerminal();
     const events: UiEvent[] = [];
@@ -83,6 +87,9 @@ describe("WorkbenchTerminalRenderer", () => {
   });
 
   it("renders recent conversations with unread and group sender preview", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2023, 10, 15, 7, 0));
+    const lastMessageAt = new Date(2023, 10, 15, 6, 13).getTime();
     const output = renderState(
       baseState({
         conversations: [
@@ -95,8 +102,8 @@ describe("WorkbenchTerminalRenderer", () => {
             lastMessagePreview: "campaignId changed",
             lastMessageSenderName: "Alice",
             lastMessageIsSelf: false,
-            lastMessageAt: 1_700_000_000_000,
-            updatedAt: 1_700_000_000_000
+            lastMessageAt,
+            updatedAt: lastMessageAt
           }
         ],
         totalUnreadCount: 3
@@ -105,7 +112,7 @@ describe("WorkbenchTerminalRenderer", () => {
 
     expect(output).toContain("Recent Chats");
     expect(output).toContain("Project A");
-    expect(stripAnsi(output)).toContain("Alice: campaignId cha...");
+    expect(stripAnsi(output)).toContain("[06:13] Alice: campaignId changed");
     expect(output).toContain("select");
   });
 
@@ -143,7 +150,10 @@ describe("WorkbenchTerminalRenderer", () => {
     expect(confirmPlain).toContain("Yes, clear data");
   });
 
-  it("truncates conversation previews to twenty-four columns", () => {
+  it("renders dated message times before conversation previews", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2023, 10, 16, 7, 0));
+    const lastMessageAt = new Date(2023, 10, 15, 6, 13).getTime();
     const output = renderState(
       baseState({
         conversations: [
@@ -154,15 +164,41 @@ describe("WorkbenchTerminalRenderer", () => {
             title: "Boss",
             unreadCount: 0,
             lastMessagePreview: "[link] 这是一个很长的链接标题",
-            lastMessageAt: 1_700_000_000_000,
-            updatedAt: 1_700_000_000_000
+            lastMessageAt,
+            updatedAt: lastMessageAt
           }
         ]
       })
     );
 
-    expect(stripAnsi(output)).toContain("[link] 这是一个很长的...");
-    expect(stripAnsi(output)).not.toContain("很长的链接标题");
+    const plain = stripAnsi(output);
+    expect(plain).toContain("[11月15日 06:13] [link] 这是一个很长的链接标题");
+  });
+
+  it("truncates long conversation titles with an ellipsis", () => {
+    const longTitle = "Very Long Conversation Title With Enough Details To Require Truncation";
+    const output = renderState(
+      baseState({
+        conversations: [
+          {
+            id: "conversation:long",
+            protocolId: "@long",
+            kind: "private",
+            title: longTitle,
+            unreadCount: 8,
+            lastMessagePreview: "short preview",
+            lastMessageAt: new Date(2023, 10, 15, 6, 13).getTime(),
+            updatedAt: new Date(2023, 10, 15, 6, 13).getTime()
+          }
+        ]
+      }),
+      { width: 72 }
+    );
+
+    const plain = stripAnsi(output);
+    expect(plain).toContain("Very Long Conversation Title With Enough Details");
+    expect(plain).toContain("… (8)");
+    expect(plain).not.toContain(longTitle);
   });
 
   it("renders sparse group preview senders with a readable fallback", () => {
@@ -176,7 +212,7 @@ describe("WorkbenchTerminalRenderer", () => {
             title: "Project A",
             unreadCount: 0,
             lastMessagePreview: "[sticker]",
-            lastMessageSenderName: "@0f2e2a0d4003e6a22454e192b282b96a",
+            lastMessageSenderName: "@sparse-group-sender",
             lastMessageIsSelf: false,
             lastMessageAt: 1_700_000_000_000,
             updatedAt: 1_700_000_000_000
@@ -187,7 +223,7 @@ describe("WorkbenchTerminalRenderer", () => {
 
     const plain = stripAnsi(output);
     expect(plain).toContain("Group member: [sticker]");
-    expect(plain).not.toContain("@0f2e2a0d4003e6a22454e192b282b96a");
+    expect(plain).not.toContain("@sparse-group-sender");
   });
 
   it("renders only the active chat body and summarizes other unread conversations", () => {
@@ -278,7 +314,7 @@ describe("WorkbenchTerminalRenderer", () => {
           id: "conversation:one",
           protocolId: "@one",
           kind: "private",
-          title: "一号测试",
+          title: "Test Contact",
           unreadCount: 0,
           updatedAt: 1_700_000_000_000
         },
@@ -286,16 +322,16 @@ describe("WorkbenchTerminalRenderer", () => {
           {
             id: "message:1",
             conversationId: "conversation:one",
-            senderName: "一号测试",
+            senderName: "Test Contact",
             isSelf: false,
-            content: "wxid_1bl0merbg3se12\n\t\t1455598372\n\t\t6545152177546939934",
+            content: "wxid_test_contact\n\t\told-message-id\n\t\tmessage-id",
             type: "notice",
             timestamp: 1_700_000_000_000,
             createdAt: 1_700_000_000_000,
             raw: {
               MsgType: 10002,
               Content:
-                '<sysmsg type="revokemsg"><revokemsg><session>wxid_1bl0merbg3se12</session><oldmsgid>1455598372</oldmsgid><msgid>6545152177546939934</msgid><replacemsg><![CDATA["一号测试" 撤回了一条消息]]></replacemsg></revokemsg></sysmsg>'
+                '<sysmsg type="revokemsg"><revokemsg><session>wxid_test_contact</session><oldmsgid>old-message-id</oldmsgid><msgid>message-id</msgid><replacemsg><![CDATA["Test Contact" recalled a message]]></replacemsg></revokemsg></sysmsg>'
             }
           }
         ]
@@ -303,9 +339,9 @@ describe("WorkbenchTerminalRenderer", () => {
     );
 
     const plain = stripAnsi(output);
-    expect(plain).toContain('"一号测试" 撤回了一条消息');
-    expect(plain).not.toContain("wxid_1bl0merbg3se12");
-    expect(plain).not.toContain("6545152177546939934");
+    expect(plain).toContain('"Test Contact" recalled a message');
+    expect(plain).not.toContain("wxid_test_contact");
+    expect(plain).not.toContain("message-id");
   });
 
   it("renders sparse group message senders with a readable fallback", () => {
@@ -324,7 +360,7 @@ describe("WorkbenchTerminalRenderer", () => {
           {
             id: "message:1",
             conversationId: "conversation:project",
-            senderName: "@0f2e2a0d4003e6a22454e192b282b96a",
+            senderName: "@sparse-group-sender",
             isSelf: false,
             content: "[sticker]",
             type: "sticker",
@@ -338,20 +374,20 @@ describe("WorkbenchTerminalRenderer", () => {
     const plain = stripAnsi(output);
     expect(plain).toContain("Group member");
     expect(plain).toContain("[sticker]");
-    expect(plain).not.toContain("@0f2e2a0d4003e6a22454e192b282b96a");
+    expect(plain).not.toContain("@sparse-group-sender");
   });
 
   it("anchors the search prompt cursor for IME input", () => {
     const output = renderState(
       baseState({
         view: "search",
-        searchKeyword: "一号",
+        searchKeyword: "测试",
         searchResults: [
           {
             id: "contact:one",
             protocolId: "@one",
             kind: "private",
-            displayName: "一号测试",
+            displayName: "测试联系人",
             isSelf: false,
             updatedAt: 1_700_000_000_000
           }
@@ -359,7 +395,7 @@ describe("WorkbenchTerminalRenderer", () => {
       })
     );
 
-    expect(output).toContain(`search ▸ 一号${CURSOR_MARKER}`);
+    expect(output).toContain(`search ▸ 测试${CURSOR_MARKER}`);
   });
 
   it("renders older message list content when the chat scroll offset is above the bottom", () => {

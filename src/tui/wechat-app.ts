@@ -1,5 +1,4 @@
-import { SelectList } from "@earendil-works/pi-tui";
-import { visibleWidth } from "@earendil-works/pi-tui";
+import { SelectList, visibleWidth } from "@earendil-works/pi-tui";
 import type { Component, SelectItem, SelectListTheme, TUI } from "@earendil-works/pi-tui";
 import type { RenderState, UiEvent } from "../types.js";
 import { theme } from "./theme.js";
@@ -11,8 +10,15 @@ import { ChatEditor } from "./components/chat-editor.js";
 import { CommandPanel } from "./components/command-panel.js";
 import { ConfirmPanel } from "./components/confirm-panel.js";
 import type { FileRegistry } from "../util/file-hash.js";
+import { formatConversationPreviewTime } from "../util/time.js";
 
 const SEARCH_ITEM_VALUE = "__search__";
+const PRIMARY_COLUMN_GAP = 2;
+const CONVERSATION_TITLE_MIN_WIDTH = 20;
+const CONVERSATION_TITLE_MAX_WIDTH = 56;
+const SELECT_LIST_PREFIX_WIDTH = 2;
+const DESCRIPTION_SAFETY_WIDTH = 2;
+const MIN_DESCRIPTION_WIDTH = 10;
 
 const selectListTheme: SelectListTheme = {
   selectedPrefix: (text) => theme.accent(text),
@@ -108,17 +114,29 @@ export class WechatApp implements Component {
   }
 
   private syncConversationList(state: RenderState): void {
-    const items: SelectItem[] = state.conversations.map((c) => {
+    const labels = state.conversations.map((c) => {
       const badge = c.unreadCount > 0 ? ` (${c.unreadCount})` : "";
-      const label = `${c.title}${badge}`;
+      return `${c.title}${badge}`;
+    });
+    const primaryColumnWidth = primaryColumnWidthForLabels([...labels, "Search contacts"]);
+    const terminalWidth = this.tui.terminal.columns;
+
+    const items: SelectItem[] = state.conversations.map((c, index) => {
+      const label = labels[index] ?? c.title;
       const lastMessageSenderName =
         c.kind === "group" ? readableGroupSenderName(c.lastMessageSenderName) : c.lastMessageSenderName;
-      const preview = c.lastMessagePreview
+      const previewText = c.lastMessagePreview
         ? ((c.kind === "group" || c.title === "公众号") && lastMessageSenderName
             ? `${c.lastMessageIsSelf ? "You" : lastMessageSenderName}: ${c.lastMessagePreview}`
             : c.lastMessageIsSelf ? `You: ${c.lastMessagePreview}` : c.lastMessagePreview)
         : undefined;
-      return { value: c.id, label, description: preview ? truncatePreview(preview, 24) : undefined };
+      const preview = previewText && c.lastMessageAt ? `[${formatConversationPreviewTime(c.lastMessageAt)}] ${previewText}` : previewText;
+      const previewWidth = conversationPreviewWidth(label, terminalWidth, primaryColumnWidth);
+      return {
+        value: c.id,
+        label,
+        description: preview && previewWidth > MIN_DESCRIPTION_WIDTH ? truncateToWidth(preview, previewWidth) : undefined
+      };
     });
     items.push({ value: SEARCH_ITEM_VALUE, label: "Search contacts", description: "/contacts" });
 
@@ -137,8 +155,9 @@ export class WechatApp implements Component {
 
   private createConversationList(items: SelectItem[], maxVisible: number): SelectList {
     const list = new SelectList(items, maxVisible, selectListTheme, {
-      minPrimaryColumnWidth: 16,
-      maxPrimaryColumnWidth: 40
+      minPrimaryColumnWidth: CONVERSATION_TITLE_MIN_WIDTH,
+      maxPrimaryColumnWidth: CONVERSATION_TITLE_MAX_WIDTH,
+      truncatePrimary: ({ text, maxWidth }) => truncateConversationLabel(text, maxWidth)
     });
     list.onSelectionChange = (item) => {
       const index = this.conversationItems.findIndex((candidate) => candidate.value === item.value);
@@ -246,13 +265,41 @@ function readableGroupSenderName(input: string | undefined): string {
   return name;
 }
 
-function truncatePreview(input: string, maxWidth: number): string {
+function primaryColumnWidthForLabels(labels: string[]): number {
+  const widest = labels.reduce((width, label) => Math.max(width, visibleWidth(label) + PRIMARY_COLUMN_GAP), 0);
+  return clamp(widest, CONVERSATION_TITLE_MIN_WIDTH, CONVERSATION_TITLE_MAX_WIDTH);
+}
+
+function conversationPreviewWidth(label: string, terminalWidth: number, primaryColumnWidth: number): number {
+  const effectivePrimaryColumnWidth = Math.max(1, Math.min(primaryColumnWidth, terminalWidth - SELECT_LIST_PREFIX_WIDTH - 4));
+  const maxPrimaryWidth = Math.max(1, effectivePrimaryColumnWidth - PRIMARY_COLUMN_GAP);
+  const truncatedLabel = truncateConversationLabel(label, maxPrimaryWidth);
+  const spacingWidth = Math.max(1, effectivePrimaryColumnWidth - visibleWidth(truncatedLabel));
+  const descriptionStart = SELECT_LIST_PREFIX_WIDTH + visibleWidth(truncatedLabel) + spacingWidth;
+  return terminalWidth - descriptionStart - DESCRIPTION_SAFETY_WIDTH;
+}
+
+function truncateConversationLabel(input: string, maxWidth: number): string {
+  if (maxWidth <= 0) {
+    return "";
+  }
+  const badge = input.match(/ \(\d+\)$/)?.[0] ?? "";
+  if (!badge || visibleWidth(badge) >= maxWidth - 1 || visibleWidth(input) <= maxWidth) {
+    return truncateToWidth(input, maxWidth);
+  }
+  return `${truncateToWidth(input.slice(0, -badge.length), maxWidth - visibleWidth(badge))}${badge}`;
+}
+
+function truncateToWidth(input: string, maxWidth: number): string {
   const text = input.replace(/\s+/g, " ").trim();
+  if (maxWidth <= 0) {
+    return "";
+  }
   if (visibleWidth(text) <= maxWidth) {
     return text;
   }
 
-  const ellipsis = "...";
+  const ellipsis = "…";
   const targetWidth = Math.max(0, maxWidth - visibleWidth(ellipsis));
   let result = "";
   let width = 0;
@@ -265,4 +312,8 @@ function truncatePreview(input: string, maxWidth: number): string {
     width += nextWidth;
   }
   return `${result}${ellipsis}`;
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(Math.max(value, min), max);
 }

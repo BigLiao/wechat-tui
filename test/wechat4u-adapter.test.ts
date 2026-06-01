@@ -51,7 +51,7 @@ const bot = {
 };
 
 const recallXml =
-  '<sysmsg type="revokemsg"><revokemsg><session>wxid_1bl0merbg3se12</session><oldmsgid>1455598372</oldmsgid><msgid>6545152177546939934</msgid><replacemsg><![CDATA["一号测试" 撤回了一条消息]]></replacemsg></revokemsg></sysmsg>';
+  '<sysmsg type="revokemsg"><revokemsg><session>wxid_test_contact</session><oldmsgid>old-message-id</oldmsgid><msgid>message-id</msgid><replacemsg><![CDATA["Test Contact" recalled a message]]></replacemsg></revokemsg></sysmsg>';
 
 describe("normalizeWechat4uMessage", () => {
   it("drops Web WeChat status notify messages", () => {
@@ -331,9 +331,9 @@ describe("normalizeWechat4uMessage", () => {
     );
 
     expect(message?.type).toBe("notice");
-    expect(message?.content).toBe('"一号测试" 撤回了一条消息');
-    expect(message?.content).not.toContain("wxid_1bl0merbg3se12");
-    expect(message?.content).not.toContain("6545152177546939934");
+    expect(message?.content).toBe('"Test Contact" recalled a message');
+    expect(message?.content).not.toContain("wxid_test_contact");
+    expect(message?.content).not.toContain("message-id");
   });
 
   it("recognizes recalled payloads carried by system messages", () => {
@@ -350,7 +350,7 @@ describe("normalizeWechat4uMessage", () => {
     );
 
     expect(message?.type).toBe("notice");
-    expect(message?.content).toBe('"一号测试" 撤回了一条消息');
+    expect(message?.content).toBe('"Test Contact" recalled a message');
   });
 
   it("uses group member metadata even when getDisplayName returns an empty string", () => {
@@ -413,7 +413,7 @@ describe("normalizeWechat4uMessage", () => {
         MsgId: "group-sticker-1",
         FromUserName: "@@project",
         ToUserName: "@me",
-        ActualUserName: "@0f2e2a0d4003e6a22454e192b282b96a",
+        ActualUserName: "@sparse-group-sender",
         MsgType: 47,
         Content: "",
         CreateTime: 1_700_000_000
@@ -422,7 +422,7 @@ describe("normalizeWechat4uMessage", () => {
     );
 
     expect(message?.type).toBe("sticker");
-    expect(message?.sender.protocolId).toBe("@0f2e2a0d4003e6a22454e192b282b96a");
+    expect(message?.sender.protocolId).toBe("@sparse-group-sender");
     expect(message?.sender.displayName).toBe("Group member");
     expect(message?.content).toBe("[sticker]");
   });
@@ -434,7 +434,7 @@ describe("normalizeWechat4uMessage", () => {
         FromUserName: "@@project",
         ToUserName: "@me",
         ActualUserName: "@sticker-sender",
-        ActualNickName: "贴纸达人",
+        ActualNickName: "Sticker Sender",
         MsgType: 47,
         Content: "",
         CreateTime: 1_700_000_000
@@ -443,7 +443,7 @@ describe("normalizeWechat4uMessage", () => {
     );
 
     expect(message?.type).toBe("sticker");
-    expect(message?.sender.displayName).toBe("贴纸达人");
+    expect(message?.sender.displayName).toBe("Sticker Sender");
     expect(message?.content).toBe("[sticker]");
   });
 });

@@ -14,6 +14,7 @@ import type {
   UserProfile,
   WeChatProtocol
 } from "../types.js";
+import { groupMemberCountFromRaw, stripGroupMemberCountSuffix } from "../util/group-name.js";
 import { contactId, conversationFromContact, localMessageId } from "../util/ids.js";
 import { cleanText, decodeHtml } from "../util/text.js";
 import { formatWechatRecallMessage } from "../util/wechat-recall.js";
@@ -386,17 +387,11 @@ function normalizeUser(raw?: RawContact): UserProfile {
 function normalizeContact(raw: RawContact, self?: RawContact): ContactInput {
   const protocolId = raw.UserName;
   const kind = detectContactKind(raw, self);
-  const displayName = firstCleanContactDisplayName(
-    raw.getDisplayName?.(),
-    raw.RemarkName,
-    raw.DisplayName,
-    raw.NickName,
-    raw.Alias,
-    protocolId,
-    "Unknown"
-  );
-  const remarkName = cleanText(raw.RemarkName);
-  const nickName = cleanText(raw.NickName);
+  const groupMemberCount = kind === "group" ? groupMemberCountFromRaw(raw) : undefined;
+  const rawDisplayName = contactDisplayName(raw, kind, groupMemberCount, protocolId);
+  const displayName = cleanContactNamePart(kind, rawDisplayName, groupMemberCount);
+  const remarkName = cleanContactNamePart(kind, raw.RemarkName, groupMemberCount);
+  const nickName = cleanContactNamePart(kind, raw.NickName, groupMemberCount);
   const alias = cleanText(raw.Alias);
   const uin = raw.Uin ? String(raw.Uin) : undefined;
   const id = contactId(kind, contactIdentityParts(kind, protocolId, uin, alias, remarkName, nickName, displayName));
@@ -910,8 +905,74 @@ function firstCleanContactDisplayName(...inputs: Array<unknown>): string {
   return "Unknown";
 }
 
+function contactDisplayName(
+  raw: RawContact,
+  kind: ContactKind,
+  groupMemberCount: number | undefined,
+  protocolId: string | undefined
+): string {
+  if (kind === "group") {
+    return firstCleanContactDisplayName(
+      raw.RemarkName,
+      raw.DisplayName,
+      raw.NickName,
+      raw.Alias,
+      groupMemberListDisplayName(raw.MemberList, groupMemberCount),
+      raw.getDisplayName?.(),
+      protocolId,
+      "Unknown"
+    );
+  }
+  return firstCleanContactDisplayName(
+    raw.getDisplayName?.(),
+    raw.RemarkName,
+    raw.DisplayName,
+    raw.NickName,
+    raw.Alias,
+    protocolId,
+    "Unknown"
+  );
+}
+
+function groupMemberListDisplayName(memberList: RawContact[] | undefined, memberCount: number | undefined): string | undefined {
+  if (!Array.isArray(memberList) || memberList.length === 0) {
+    return undefined;
+  }
+  if (memberCount !== undefined && memberList.length < memberCount) {
+    return undefined;
+  }
+  const names = memberList
+    .map((member) =>
+      firstCleanGroupMemberDisplayName(member.RemarkName, member.DisplayName, member.NickName, member.Alias)
+    )
+    .filter(Boolean);
+  if (names.length === 0) {
+    return undefined;
+  }
+  const total = memberCount ?? names.length;
+  if (total > 8) {
+    return `${names.slice(0, 4).join("、")} 等${total}人`;
+  }
+  return names.join("、");
+}
+
+function firstCleanGroupMemberDisplayName(...inputs: Array<unknown>): string | undefined {
+  for (const input of inputs) {
+    const displayName = cleanGroupSenderDisplayName(input);
+    if (displayName) {
+      return displayName;
+    }
+  }
+  return undefined;
+}
+
 function cleanContactDisplayName(input: unknown): string {
   return cleanText(input).replace(/^\[群\]\s*/, "");
+}
+
+function cleanContactNamePart(kind: ContactKind, input: unknown, groupMemberCount: number | undefined): string {
+  const value = cleanText(input);
+  return kind === "group" ? stripGroupMemberCountSuffix(value, groupMemberCount) : value;
 }
 
 function cleanGroupSenderDisplayName(input: unknown): string | undefined {

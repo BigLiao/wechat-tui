@@ -191,7 +191,7 @@ Row format:
              titleWidth        remaining space for preview
 
 If selected: chalk.inverse(row)
-Else: row (plain)
+Otherwise: row (plain)
 ```
 
 ### Conversation Picker Windowing
@@ -425,4 +425,3 @@ User sees update
 ```
 
 Typical frame rate: 20-60 Hz (updates every 17-50ms visible)
-

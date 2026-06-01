@@ -423,9 +423,9 @@ describe("SqliteStore", () => {
       id: contactId("private", ["@old-one"]),
       protocolId: "@old-one",
       kind: "private",
-      displayName: "一号测试",
-      remarkName: "一号测试",
-      nickName: "猎魔人"
+      displayName: "Test Contact",
+      remarkName: "Test Contact",
+      nickName: "Alternate Name"
     };
     const currentContact: ContactInput = {
       ...staleContact,
@@ -440,7 +440,7 @@ describe("SqliteStore", () => {
         id: localMessageId([staleConversation.id, "old"]),
         conversationId: staleConversation.id,
         senderId: staleContact.id,
-        senderName: "一号测试",
+        senderName: "Test Contact",
         isSelf: false,
         content: "old message",
         type: "text",
@@ -459,7 +459,7 @@ describe("SqliteStore", () => {
     expect(merged.protocolId).toBe("@new-one");
     expect(merged.lastMessagePreview).toBe("old message");
     expect(store.findConversationById(staleConversation.id)).toBeUndefined();
-    expect(store.listRecentConversations().filter((conversation) => conversation.title === "一号测试")).toHaveLength(1);
+    expect(store.listRecentConversations().filter((conversation) => conversation.title === "Test Contact")).toHaveLength(1);
     expect(store.listMessages(staleConversation.id)).toHaveLength(0);
     const messages = store.listMessages(currentConversation.id);
     expect(messages).toHaveLength(1);

@@ -10,7 +10,7 @@ const tempDirs: string[] = [];
 function tempImagePath(): string {
   const dir = mkdtempSync(join(tmpdir(), "wechat-tui-path-"));
   tempDirs.push(dir);
-  const imagePath = join(dir, "截屏2026-05-28 10.06.35.png");
+  const imagePath = join(dir, "sample image 2026-05-28.png");
   writeFileSync(imagePath, "fake png");
   return imagePath;
 }

@@ -15,6 +15,7 @@ import type {
   ConnectionState,
   ContactInput,
   ContactRecord,
+  ContactKind,
   ConversationInput,
   ConversationRecord,
   IncomingProtocolMessage,
@@ -30,6 +31,7 @@ import type {
   WeChatProtocol,
   WorkbenchRenderer
 } from "./types.js";
+import { normalizeComparableGroupName, normalizeComparableText } from "./util/group-name.js";
 import { conversationFromContact, localMessageId } from "./util/ids.js";
 import { FileRegistry } from "./util/file-hash.js";
 import { MediaCache, extensionFromContentType } from "./util/media-cache.js";
@@ -1154,19 +1156,20 @@ function activeConversationMatchesInput(
   return (
     !!activeConversation &&
     activeConversation.kind === incomingConversation.kind &&
-    normalizedConversationName(activeConversation.title) === normalizedConversationName(incomingConversation.title)
+    normalizedConversationName(activeConversation.kind, activeConversation.title) ===
+      normalizedConversationName(incomingConversation.kind, incomingConversation.title)
   );
 }
 
 function contactMatchesConversationTitle(contact: ContactRecord, conversation: ConversationRecord): boolean {
-  const title = normalizedConversationName(conversation.title);
+  const title = normalizedConversationName(conversation.kind, conversation.title);
   return [contact.displayName, contact.remarkName, contact.nickName, contact.alias].some(
-    (value) => normalizedConversationName(value) === title
+    (value) => normalizedConversationName(contact.kind, value) === title
   );
 }
 
-function normalizedConversationName(value: string | undefined): string {
-  return (value ?? "").normalize("NFKC").trim().toLowerCase().replace(/\s+/g, " ");
+function normalizedConversationName(kind: ContactKind, value: string | undefined): string {
+  return kind === "group" ? normalizeComparableGroupName(value) : normalizeComparableText(value);
 }
 
 function foldPublicConversations(conversations: ConversationRecord[]): ConversationRecord[] {

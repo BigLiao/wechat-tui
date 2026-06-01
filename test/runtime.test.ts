@@ -189,25 +189,25 @@ describe("WeChatRuntime", () => {
     const runtime = new WeChatRuntime(protocol, store, renderer, { initialHistoryLimit: 10 });
 
     await runtime.start();
-    protocol.emitPublicMessage("深圳本地宝", "article one", 1_700_000_000_000);
+    protocol.emitPublicMessage("City Guide", "article one", 1_700_000_000_000);
 
     expect(renderer.latest.conversations).toHaveLength(1);
     expect(renderer.latest.conversations[0]?.title).toBe("公众号");
     expect(renderer.latest.conversations[0]?.unreadCount).toBe(0);
 
-    protocol.emitPublicMessage("深圳民政", "article two", 1_700_000_100_000);
+    protocol.emitPublicMessage("City Services", "article two", 1_700_000_100_000);
 
     expect(renderer.latest.conversations).toHaveLength(1);
     expect(renderer.latest.conversations[0]?.title).toBe("公众号");
     expect(renderer.latest.conversations[0]?.unreadCount).toBe(0);
-    expect(renderer.latest.conversations[0]?.lastMessageSenderName).toBe("深圳民政");
+    expect(renderer.latest.conversations[0]?.lastMessageSenderName).toBe("City Services");
     expect(renderer.latest.totalUnreadCount).toBe(0);
     expect(renderer.latest.unreadConversations).toHaveLength(0);
     expect(renderer.latest.statusMessage).not.toContain("new message");
 
     await runtime.handleKey(key.enter());
     expect(renderer.latest.view).toBe("chat");
-    expect(renderer.latest.activeConversation?.title).toBe("深圳民政");
+    expect(renderer.latest.activeConversation?.title).toBe("City Services");
     store.close();
   });
 
@@ -358,7 +358,7 @@ describe("WeChatRuntime", () => {
   it("sends quoted image paths with spaces", async () => {
     const imageDir = mkdtempSync(join(tmpdir(), "wechat-tui-send-image-"));
     tempDirs.push(imageDir);
-    const imagePath = join(imageDir, "截屏2026-05-28 10.06.35.png");
+    const imagePath = join(imageDir, "sample image 2026-05-28.png");
     writeFileSync(imagePath, "fake png");
     const store = new SqliteStore(tempDb());
     const protocol = new CapturingFileProtocol();

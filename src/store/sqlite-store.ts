@@ -22,6 +22,12 @@ import {
   summarizeSearchResults,
   summarizeStoredMessage
 } from "../logging.js";
+import {
+  groupMemberCountFromRaw,
+  groupMemberCountSuffix,
+  normalizeComparableGroupName,
+  normalizeComparableText
+} from "../util/group-name.js";
 import { loadNodeSqlite } from "../util/node-sqlite.js";
 import { cleanText } from "../util/text.js";
 
@@ -328,7 +334,16 @@ export class SqliteStore implements MessageStore {
       .get(accountId, normalized, normalized, normalized, normalized, like, like, like, like, normalized, normalized, normalized, normalized) as
       | ContactRow
       | undefined;
-    const contact = row ? asContact(row) : undefined;
+    let contact = row ? asContact(row) : undefined;
+    const normalizedGroupName = normalizeComparableGroupName(query);
+    if (!contact && normalizedGroupName) {
+      const groupRows = this.db
+        .prepare(
+          "SELECT * FROM contacts WHERE account_id = ? AND is_self = 0 AND is_stale = 0 AND kind = 'group' ORDER BY updated_at DESC"
+        )
+        .all(accountId) as unknown as ContactRow[];
+      contact = groupRows.map(asContact).find((candidate) => contactMatchesGroupName(candidate, normalizedGroupName));
+    }
     this.options.logger?.debug({ query, found: !!contact, contactId: contact?.id }, "contact lookup by name");
     return contact;
   }
@@ -650,10 +665,14 @@ export class SqliteStore implements MessageStore {
     if (!accountId) {
       return;
     }
-    this.options.logger?.debug({ conversationId }, "marking conversation read");
-    this.db
-      .prepare("UPDATE conversations SET unread_count = 0, updated_at = ? WHERE account_id = ? AND id = ?")
-      .run(Date.now(), accountId, conversationId);
+    const conversation = this.findConversationById(conversationId);
+    const conversationIds = conversation ? this.findFoldedConversationIds(accountId, conversation) : [conversationId];
+    const now = Date.now();
+    const statement = this.db.prepare("UPDATE conversations SET unread_count = 0, updated_at = ? WHERE account_id = ? AND id = ?");
+    for (const id of conversationIds) {
+      statement.run(now, accountId, id);
+    }
+    this.options.logger?.debug({ conversationId, conversationIds }, "marked conversation read");
   }
 
   totalUnreadCount(): number {
@@ -835,6 +854,23 @@ export class SqliteStore implements MessageStore {
       .sort(compareRecentConversations);
   }
 
+  private findFoldedConversationIds(accountId: string, conversation: ConversationRecord): string[] {
+    const activeContacts = this.listActiveMergeableContacts(accountId);
+    const contact = this.uniqueActiveContactForConversation(accountId, activeContacts, conversation);
+    if (!contact) {
+      return [conversation.id];
+    }
+
+    const rows = this.db
+      .prepare("SELECT * FROM conversations WHERE account_id = ? AND kind = ?")
+      .all(accountId, conversation.kind) as unknown as ConversationRow[];
+    const ids = rows
+      .map(asConversation)
+      .filter((candidate) => this.contactCanFoldConversation(accountId, contact, candidate))
+      .map((candidate) => candidate.id);
+    return ids.length > 0 ? ids : [conversation.id];
+  }
+
   private listActiveMergeableContacts(accountId: string): ContactRecord[] {
     const rows = this.db
       .prepare(
@@ -886,25 +922,34 @@ export class SqliteStore implements MessageStore {
   }
 
   private findLazyMergeActiveContacts(accountId: string, contact: ContactRecord): ContactRecord[] {
-    const rows = this.db
-      .prepare("SELECT * FROM contacts WHERE account_id = ? AND is_self = 0 AND is_stale = 0 AND kind = ? AND display_name = ?")
-      .all(accountId, contact.kind, contact.displayName) as unknown as ContactRow[];
-    return rows.map(asContact).filter((candidate) => sameLazyMergeContact(candidate, contact));
+    return this.findLazyMergeCandidateContacts(accountId, contact, false).filter((candidate) =>
+      sameLazyMergeContact(candidate, contact)
+    );
   }
 
   private findLazyMergeStaleContacts(accountId: string, contact: ContactRecord): ContactRecord[] {
-    const rows = this.db
-      .prepare("SELECT * FROM contacts WHERE account_id = ? AND is_self = 0 AND is_stale = 1 AND kind = ? AND display_name = ?")
-      .all(accountId, contact.kind, contact.displayName) as unknown as ContactRow[];
-    return rows
-      .map(asContact)
-      .filter(
-        (candidate) =>
-          candidate.id !== contact.id &&
-          !!candidate.protocolId &&
-          candidate.protocolId !== contact.protocolId &&
-          sameLazyMergeContact(candidate, contact)
-      );
+    return this.findLazyMergeCandidateContacts(accountId, contact, true).filter(
+      (candidate) =>
+        candidate.id !== contact.id &&
+        !!candidate.protocolId &&
+        candidate.protocolId !== contact.protocolId &&
+        sameLazyMergeContact(candidate, contact)
+    );
+  }
+
+  private findLazyMergeCandidateContacts(accountId: string, contact: ContactRecord, stale: boolean): ContactRecord[] {
+    const staleValue = stale ? 1 : 0;
+    const rows =
+      contact.kind === "group"
+        ? (this.db
+            .prepare("SELECT * FROM contacts WHERE account_id = ? AND is_self = 0 AND is_stale = ? AND kind = ?")
+            .all(accountId, staleValue, contact.kind) as unknown as ContactRow[])
+        : (this.db
+            .prepare(
+              "SELECT * FROM contacts WHERE account_id = ? AND is_self = 0 AND is_stale = ? AND kind = ? AND display_name = ?"
+            )
+            .all(accountId, staleValue, contact.kind, contact.displayName) as unknown as ContactRow[]);
+    return rows.map(asContact);
   }
 
   private findLazyMergeStaleConversations(
@@ -915,7 +960,7 @@ export class SqliteStore implements MessageStore {
   ): ConversationRecord[] {
     const staleConversationById = new Map<string, ConversationRecord>();
     const statement = this.db.prepare(
-      "SELECT * FROM conversations WHERE account_id = ? AND kind = ? AND protocol_id = ? AND id != ? AND title = ?"
+      "SELECT * FROM conversations WHERE account_id = ? AND kind = ? AND protocol_id = ? AND id != ?"
     );
 
     for (const staleContact of staleContacts) {
@@ -926,11 +971,13 @@ export class SqliteStore implements MessageStore {
         accountId,
         staleContact.kind,
         staleContact.protocolId,
-        conversation.id,
-        contact.displayName
+        conversation.id
       ) as unknown as ConversationRow[];
       for (const row of rows) {
-        staleConversationById.set(row.id, asConversation(row));
+        const staleConversation = asConversation(row);
+        if (contactMatchesConversation(contact, staleConversation)) {
+          staleConversationById.set(row.id, staleConversation);
+        }
       }
     }
 
@@ -1191,6 +1238,8 @@ interface UsefulGroupMember {
   displayName: string;
 }
 
+const CONTACT_NAME_FIELDS = ["displayName", "remarkName", "nickName", "alias"] as const;
+
 function groupMembersWithUsefulNames(raw: unknown): UsefulGroupMember[] {
   if (!raw || typeof raw !== "object") {
     return [];
@@ -1247,48 +1296,103 @@ function cleanGroupMemberName(value: unknown): string | undefined {
 }
 
 function sameLazyMergeContact(left: ContactRecord, right: ContactRecord): boolean {
-  const sameTextFields =
-    left.kind === right.kind &&
-    mergeText(left.displayName) === mergeText(right.displayName) &&
-    mergeText(left.remarkName) === mergeText(right.remarkName) &&
-    mergeText(left.nickName) === mergeText(right.nickName) &&
-    mergeText(left.alias) === mergeText(right.alias);
-  if (!sameTextFields) {
+  if (left.kind !== right.kind) {
     return false;
   }
-  return left.kind === "group" ? sameGroupMemberCount(left.raw, right.raw) : true;
-}
-
-function sameGroupMemberCount(left: unknown, right: unknown): boolean {
-  const leftCount = groupMemberCount(left);
-  const rightCount = groupMemberCount(right);
-  return leftCount !== undefined && rightCount !== undefined && leftCount === rightCount;
-}
-
-function groupMemberCount(raw: unknown): number | undefined {
-  if (!raw || typeof raw !== "object") {
-    return undefined;
+  if (left.kind === "group") {
+    return sameGroupName(left, right) && compatibleGroupMemberCounts(left, right);
   }
-  const value = raw as { MemberCount?: unknown; MemberList?: unknown };
-  const count =
-    typeof value.MemberCount === "number"
-      ? value.MemberCount
-      : typeof value.MemberCount === "string"
-        ? Number(value.MemberCount)
-        : Number.NaN;
-  if (Number.isFinite(count) && count >= 0) {
-    return count;
-  }
-  return Array.isArray(value.MemberList) ? value.MemberList.length : undefined;
+  return CONTACT_NAME_FIELDS.every(
+    (field) => normalizeComparableText(left[field]) === normalizeComparableText(right[field])
+  );
 }
 
-function mergeText(value: string | undefined): string {
-  return (value ?? "").normalize("NFKC").trim().toLowerCase().replace(/\s+/g, " ");
+function sameGroupName(left: ContactRecord, right: ContactRecord): boolean {
+  const rightNames = groupNameCandidates(right);
+  return groupNameCandidates(left).some((leftName) =>
+    rightNames.some((rightName) => groupNamesMatch(leftName, rightName))
+  );
+}
+
+function groupNameCandidates(contact: ContactRecord): string[] {
+  return CONTACT_NAME_FIELDS.map((field) => normalizeComparableGroupName(contact[field])).filter(Boolean);
+}
+
+function compatibleGroupMemberCounts(left: ContactRecord, right: ContactRecord): boolean {
+  const leftCount = groupMemberCountForContact(left);
+  const rightCount = groupMemberCountForContact(right);
+  return leftCount === undefined || rightCount === undefined || leftCount === rightCount;
+}
+
+function groupMemberCountForContact(contact: ContactRecord): number | undefined {
+  const rawCount = groupMemberCountFromRaw(contact.raw);
+  if (rawCount !== undefined) {
+    return rawCount;
+  }
+  for (const field of CONTACT_NAME_FIELDS) {
+    const suffixCount = groupMemberCountSuffix(contact[field]);
+    if (suffixCount !== undefined) {
+      return suffixCount;
+    }
+  }
+  return undefined;
+}
+
+function comparableContactName(kind: ContactKind, value: string | undefined): string {
+  return kind === "group" ? normalizeComparableGroupName(value) : normalizeComparableText(value);
 }
 
 function contactMatchesConversation(contact: ContactRecord, conversation: ConversationRecord): boolean {
-  const title = mergeText(conversation.title);
-  return [contact.displayName, contact.remarkName, contact.nickName, contact.alias].some((value) => mergeText(value) === title);
+  if (contact.kind !== conversation.kind) {
+    return false;
+  }
+  const title = comparableContactName(contact.kind, conversation.title);
+  return CONTACT_NAME_FIELDS.some((field) => contactNameMatchesTitle(contact.kind, contact[field], title));
+}
+
+function contactNameMatchesTitle(kind: ContactKind, value: string | undefined, title: string): boolean {
+  const candidate = comparableContactName(kind, value);
+  return kind === "group" ? groupNamesMatch(candidate, title) : candidate === title;
+}
+
+function contactMatchesGroupName(contact: ContactRecord, normalizedGroupName: string): boolean {
+  return (
+    contact.kind === "group" &&
+    CONTACT_NAME_FIELDS.some((field) => groupNamesMatch(normalizeComparableGroupName(contact[field]), normalizedGroupName))
+  );
+}
+
+function groupNamesMatch(left: string, right: string): boolean {
+  if (!left || !right) {
+    return false;
+  }
+  if (left === right) {
+    return true;
+  }
+  return groupNamePartsMatch(left, right);
+}
+
+function groupNamePartsMatch(left: string, right: string): boolean {
+  const leftParts = splitGroupNameParts(left);
+  const rightParts = splitGroupNameParts(right);
+  if (leftParts.length < 2 || leftParts.length !== rightParts.length) {
+    return false;
+  }
+  return leftParts.every((part, index) => sameGroupNamePart(part, rightParts[index] ?? ""));
+}
+
+function splitGroupNameParts(value: string): string[] {
+  return value
+    .split(/[、,，]+/u)
+    .map((part) => part.trim())
+    .filter(Boolean);
+}
+
+function sameGroupNamePart(left: string, right: string): boolean {
+  if (left === right) {
+    return true;
+  }
+  return left.length >= 2 && right.length >= 2 && (left.includes(right) || right.includes(left));
 }
 
 function foldConversationBucket(contact: ContactRecord | undefined, conversations: ConversationRecord[]): ConversationRecord {
