@@ -1,7 +1,25 @@
 {
   "name": "wechat-tui",
   "version": "0.2.8",
-  "description": "A terminal client for WeChat.",
+  "description": "A terminal client for WeChat. 一个在终端里使用的微信消息工具，基于 Web 微信协议实现。",
+  "keywords": [
+    "wechat",
+    "weixin",
+    "微信",
+    "微信终端",
+    "终端微信",
+    "命令行微信",
+    "web-wechat",
+    "wechat4u",
+    "terminal",
+    "tui",
+    "cli",
+    "command-line",
+    "聊天",
+    "聊天客户端",
+    "nodejs",
+    "typescript"
+  ],
   "type": "module",
   "license": "MIT",
   "repository": {
