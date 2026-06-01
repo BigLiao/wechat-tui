@@ -1,5 +1,8 @@
 # wechat-tui
 
+[![npm version](https://img.shields.io/npm/v/wechat-tui.svg)](https://www.npmjs.com/package/wechat-tui)
+[![npm downloads](https://img.shields.io/npm/dm/wechat-tui.svg)](https://www.npmjs.com/package/wechat-tui)
+
 `wechat-tui` 是一个在终端里使用微信的 TUI 客户端，基于 Web 微信协议实现。
 
 ## 功能
@@ -156,3 +159,7 @@ npm run typecheck       # 类型检查
 npm test                # 运行测试
 npm run build           # 编译到 dist/
 ```
+
+## License
+
+MIT

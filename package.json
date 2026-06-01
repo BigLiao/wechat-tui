@@ -3,6 +3,7 @@
   "version": "0.2.7",
   "description": "A terminal client for WeChat.",
   "type": "module",
+  "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/BigLiao/wechat-tui.git"
@@ -10,7 +11,8 @@
   "files": [
     "dist",
     "README.md",
-    "CHANGELOG.md"
+    "CHANGELOG.md",
+    "LICENSE"
   ],
   "bin": {
     "wechat-tui": "dist/index.js"
