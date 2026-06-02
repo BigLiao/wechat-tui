@@ -1,6 +1,6 @@
 {
   "name": "wechat-tui",
-  "version": "0.2.8",
+  "version": "0.2.9",
   "description": "A terminal client for WeChat. 一个在终端里使用的微信消息工具，基于 Web 微信协议实现。",
   "keywords": [
     "wechat",
