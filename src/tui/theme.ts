@@ -18,6 +18,7 @@ export const theme = {
   // Secondary — de-emphasized
   muted: chalk.dim,
   dim: chalk.gray,
+  media: chalk.hex("#5f9fb7"),
 
   // Semantic — status indicators only
   success: chalk.green,

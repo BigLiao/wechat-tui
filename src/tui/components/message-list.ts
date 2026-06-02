@@ -95,22 +95,19 @@ function messageDisplayContent(message: MessageRecord, conversation: Conversatio
 }
 
 function appendFileHash(message: MessageRecord, conversation: ConversationRecord, fileRegistry?: FileRegistry, content?: string): string {
-  if (!fileRegistry || !FILE_TYPES.has(message.type)) {
+  if (!FILE_TYPES.has(message.type)) {
     return content ?? "";
   }
-  const localPath = rawString(message.raw, "localFilePath");
-  // Only show hash when file is locally available
-  if (!localPath) {
-    return content ?? "";
-  }
-  const hash = fileRegistry.register(conversation.id, message.id, localPath);
   const text = content ?? `[${message.type}]`;
+  const localPath = rawString(message.raw, "localFilePath");
+  const hash = fileRegistry && localPath ? fileRegistry.register(conversation.id, message.id, localPath) : undefined;
   // Insert hash after the type tag: [file #xxxx] rest...
   const tagMatch = text.match(/^\[([^\]]+)\]/);
   if (tagMatch) {
-    return theme.dim(`[${tagMatch[1]} #${hash}]`) + text.slice(tagMatch[0].length);
+    const tag = hash ? `[${tagMatch[1]} #${hash}]` : tagMatch[0];
+    return theme.media(tag) + text.slice(tagMatch[0].length);
   }
-  return theme.dim(`[#${hash}] `) + text;
+  return hash ? theme.media(`[#${hash}] `) + text : text;
 }
 
 /** Types that represent viewable file resources */
@@ -127,19 +124,19 @@ function placeholderForMessage(message: MessageRecord, conversation: Conversatio
     case "link":
       return theme.dim("[link]");
     case "image":
-      return theme.dim(`[image${hashSuffix}]`);
+      return theme.media(`[image${hashSuffix}]`);
     case "voice":
-      return theme.dim(`[voice${hashSuffix}]`);
+      return theme.media(`[voice${hashSuffix}]`);
     case "video":
-      return theme.dim(`[video${hashSuffix}]`);
+      return theme.media(`[video${hashSuffix}]`);
     case "file": {
       const filename = rawString(message.raw, "FileName") ?? rawString(message.raw, "FileNameTitle");
-      return theme.dim(filename ? `[file${hashSuffix}] ${filename}` : `[file${hashSuffix}]`);
+      return theme.media(filename ? `[file${hashSuffix}] ${filename}` : `[file${hashSuffix}]`);
     }
     case "mini-program":
       return theme.dim("[mini-program]");
     case "sticker":
-      return theme.dim(`[sticker${hashSuffix}]`);
+      return theme.media(`[sticker${hashSuffix}]`);
     default:
       return theme.dim("[unsupported]");
   }

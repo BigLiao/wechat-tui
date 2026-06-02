@@ -1,11 +1,16 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import chalk from "chalk";
 import { CURSOR_MARKER } from "@earendil-works/pi-tui";
 import type { Terminal } from "@earendil-works/pi-tui";
 import { WorkbenchTerminalRenderer, renderState } from "../src/ui/workbench-renderer.js";
 import { MessageList } from "../src/tui/components/message-list.js";
 import { CommandPanel } from "../src/tui/components/command-panel.js";
 import { ConfirmPanel } from "../src/tui/components/confirm-panel.js";
+import { theme } from "../src/tui/theme.js";
+import { FileRegistry } from "../src/util/file-hash.js";
 import type { RenderState, UiEvent } from "../src/types.js";
+
+const defaultChalkLevel = chalk.level;
 
 function stripAnsi(input: string): string {
   return input.replace(/\x1b\[[0-9;]*m/g, "");
@@ -35,6 +40,7 @@ function baseState(overrides: Partial<RenderState>): RenderState {
 describe("WorkbenchTerminalRenderer", () => {
   afterEach(() => {
     vi.useRealTimers();
+    chalk.level = defaultChalkLevel;
   });
 
   it("ignores Kitty key release events before they reach runtime handlers", () => {
@@ -360,6 +366,39 @@ describe("WorkbenchTerminalRenderer", () => {
 
     expect(output).toContain("[image]");
     expect(output).not.toContain("<xml />");
+  });
+
+  it("renders media placeholders with a muted theme color", () => {
+    chalk.level = 1;
+    const activeConversation = {
+      id: "conversation:boss",
+      protocolId: "@boss",
+      kind: "private" as const,
+      title: "Boss",
+      unreadCount: 0,
+      updatedAt: 1_700_000_000_000
+    };
+    const message = {
+      id: "message:image",
+      conversationId: activeConversation.id,
+      senderName: "Boss",
+      isSelf: false,
+      content: "<xml />",
+      type: "image" as const,
+      timestamp: 1_700_000_000_000,
+      createdAt: 1_700_000_000_000,
+      raw: { localFilePath: "/tmp/wechat-tui-image.png" }
+    };
+    const fileRegistry = new FileRegistry();
+    const hash = fileRegistry.register(activeConversation.id, message.id, message.raw.localFilePath);
+
+    const output = new MessageList()
+      .render(baseState({ view: "chat", activeConversation, messages: [message] }), 80, 8, fileRegistry)
+      .join("\n");
+
+    expect(stripAnsi(output)).toContain(`[image #${hash}]`);
+    expect(output).toContain(theme.media(`[image #${hash}]`));
+    expect(output).not.toContain(theme.dim(`[image #${hash}]`));
   });
 
   it("renders stored recalled notices from raw protocol data", () => {
