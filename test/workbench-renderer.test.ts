@@ -150,7 +150,7 @@ describe("WorkbenchTerminalRenderer", () => {
     expect(confirmPlain).toContain("Yes, clear data");
   });
 
-  it("renders dated message times before conversation previews", () => {
+  it("renders relative message times before conversation previews", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date(2023, 10, 16, 7, 0));
     const lastMessageAt = new Date(2023, 10, 15, 6, 13).getTime();
@@ -172,7 +172,63 @@ describe("WorkbenchTerminalRenderer", () => {
     );
 
     const plain = stripAnsi(output);
-    expect(plain).toContain("[11月15日 06:13] [link] 这是一个很长的链接标题");
+    expect(plain).toContain("[昨天 06:13] [link] 这是一个很长的链接标题");
+  });
+
+  it("renders chat message times with relative date labels", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2023, 10, 16, 0, 5));
+    const output = renderState(
+      baseState({
+        view: "chat",
+        activeConversation: {
+          id: "conversation:boss",
+          protocolId: "@boss",
+          kind: "private",
+          title: "Boss",
+          unreadCount: 0,
+          updatedAt: new Date(2023, 10, 16, 0, 1).getTime()
+        },
+        messages: [
+          {
+            id: "message:today",
+            conversationId: "conversation:boss",
+            senderName: "Boss",
+            isSelf: false,
+            content: "today",
+            type: "text",
+            timestamp: new Date(2023, 10, 16, 0, 1).getTime(),
+            createdAt: new Date(2023, 10, 16, 0, 1).getTime()
+          },
+          {
+            id: "message:yesterday",
+            conversationId: "conversation:boss",
+            senderName: "Boss",
+            isSelf: false,
+            content: "yesterday",
+            type: "text",
+            timestamp: new Date(2023, 10, 15, 23, 59).getTime(),
+            createdAt: new Date(2023, 10, 15, 23, 59).getTime()
+          },
+          {
+            id: "message:older",
+            conversationId: "conversation:boss",
+            senderName: "Boss",
+            isSelf: false,
+            content: "older",
+            type: "text",
+            timestamp: new Date(2023, 10, 14, 6, 13).getTime(),
+            createdAt: new Date(2023, 10, 14, 6, 13).getTime()
+          }
+        ]
+      }),
+      { width: 100, rows: 32 }
+    );
+
+    const plain = stripAnsi(output);
+    expect(plain).toContain("[00:01] Boss");
+    expect(plain).toContain("[昨天 23:59] Boss");
+    expect(plain).toContain("[11月14日 06:13] Boss");
   });
 
   it("truncates long conversation titles with an ellipsis", () => {

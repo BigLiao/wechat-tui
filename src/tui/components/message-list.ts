@@ -1,6 +1,6 @@
 import { wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { theme, fit } from "../theme.js";
-import { formatClock } from "../../util/time.js";
+import { formatChatTimestamp } from "../../util/time.js";
 import { formatWechatRecallMessage } from "../../util/wechat-recall.js";
 import type { ConversationRecord, MessageRecord, RenderState } from "../../types.js";
 import type { FileRegistry } from "../../util/file-hash.js";
@@ -46,11 +46,11 @@ export class MessageList {
 function formatMessage(message: MessageRecord, conversation: ConversationRecord, width: number, fileRegistry?: FileRegistry): string[] {
   const lines: string[] = [];
 
-  // Header: [HH:MM] Sender
+  // Header: [time] Sender
   const sender = message.isSelf
     ? "You"
     : (conversation.kind === "group" ? readableGroupSenderName(message.senderName) : conversation.title);
-  const time = formatClock(message.timestamp);
+  const time = formatChatTimestamp(message.timestamp);
   const senderStyled = message.isSelf ? theme.selfName(sender) : theme.otherName(sender);
   const timeStyled = theme.dim(`[${time}]`);
 

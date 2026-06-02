@@ -16,16 +16,35 @@ export function formatDateTime(timestamp: number, locale = "zh-CN"): string {
   }).format(new Date(timestamp));
 }
 
-export function formatConversationPreviewTime(timestamp: number, now = Date.now()): string {
+export function formatChatTimestamp(timestamp: number, now = Date.now()): string {
   const date = new Date(timestamp);
   const current = new Date(now);
   const time = formatClock(timestamp);
-  if (
-    date.getFullYear() === current.getFullYear() &&
-    date.getMonth() === current.getMonth() &&
-    date.getDate() === current.getDate()
-  ) {
+  if (isSameLocalDay(date, current)) {
     return time;
   }
-  return `${date.getMonth() + 1}月${date.getDate()}日 ${time}`;
+  if (isPreviousLocalDay(date, current)) {
+    return `昨天 ${time}`;
+  }
+  if (date.getFullYear() === current.getFullYear()) {
+    return `${date.getMonth() + 1}月${date.getDate()}日 ${time}`;
+  }
+  return `${date.getFullYear()}年${date.getMonth() + 1}月${date.getDate()}日 ${time}`;
+}
+
+export function formatConversationPreviewTime(timestamp: number, now = Date.now()): string {
+  return formatChatTimestamp(timestamp, now);
+}
+
+function isSameLocalDay(left: Date, right: Date): boolean {
+  return (
+    left.getFullYear() === right.getFullYear() &&
+    left.getMonth() === right.getMonth() &&
+    left.getDate() === right.getDate()
+  );
+}
+
+function isPreviousLocalDay(date: Date, current: Date): boolean {
+  const yesterday = new Date(current.getFullYear(), current.getMonth(), current.getDate() - 1);
+  return isSameLocalDay(date, yesterday);
 }
