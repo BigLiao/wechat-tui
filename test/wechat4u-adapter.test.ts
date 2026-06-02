@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { isRecoverableWechat4uError, normalizeWechat4uMessage } from "../src/protocol/wechat4u-adapter.js";
+import {
+  hydrateSparseGroupSender,
+  isRecoverableWechat4uError,
+  normalizeWechat4uMessage
+} from "../src/protocol/wechat4u-adapter.js";
 
 const bot = {
   user: {
@@ -445,6 +449,107 @@ describe("normalizeWechat4uMessage", () => {
     expect(message?.type).toBe("sticker");
     expect(message?.sender.displayName).toBe("Sticker Sender");
     expect(message?.content).toBe("[sticker]");
+  });
+
+  it("hydrates sparse group sender names with group-scoped batch contact lookup", async () => {
+    const group = {
+      UserName: "@@big-group",
+      NickName: "Big Group",
+      EncryChatRoomId: "@@encrypted-room",
+      MemberCount: 1,
+      MemberList: [
+        {
+          UserName: "@member",
+          DisplayName: "",
+          NickName: ""
+        }
+      ]
+    };
+    const calls: unknown[] = [];
+    const sparseBot = {
+      ...bot,
+      contacts: {
+        "@me": bot.contacts["@me"],
+        "@@big-group": group
+      },
+      batchGetContact: async (contacts: unknown[]) => {
+        calls.push(contacts);
+        return [
+          {
+            UserName: "@member",
+            NickName: "Hydrated Member",
+            DisplayName: "Hydrated Member"
+          }
+        ];
+      }
+    };
+    const raw = {
+      MsgId: "group-hydrate-1",
+      FromUserName: "@@big-group",
+      ToUserName: "@me",
+      MsgType: 1,
+      Content: "@member:\nhello",
+      OriginalContent: "@member:<br/>hello",
+      CreateTime: 1_700_000_000
+    };
+
+    const hydratedGroup = await hydrateSparseGroupSender(raw, sparseBot);
+    const message = normalizeWechat4uMessage(raw, sparseBot);
+
+    expect(hydratedGroup).toBe(group);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toEqual([
+      {
+        UserName: "@member",
+        EncryChatRoomId: "@@encrypted-room"
+      }
+    ]);
+    expect(message?.sender.displayName).toBe("Hydrated Member");
+    expect(message?.content).toBe("hello");
+    expect(sparseBot.contacts["@member" as keyof typeof sparseBot.contacts]).toBeUndefined();
+  });
+
+  it("retries sparse group sender hydration after an empty lookup result", async () => {
+    const group = {
+      UserName: "@@retry-group",
+      NickName: "Retry Group",
+      EncryChatRoomId: "@@retry-room",
+      MemberCount: 1,
+      MemberList: [{ UserName: "@retry-member", DisplayName: "", NickName: "" }]
+    };
+    let allowHydration = false;
+    const sparseBot = {
+      ...bot,
+      contacts: {
+        "@me": bot.contacts["@me"],
+        "@@retry-group": group
+      },
+      batchGetContact: async () => {
+        return allowHydration
+          ? [{ UserName: "@retry-member", NickName: "Retry Member", DisplayName: "Retry Member" }]
+          : [];
+      }
+    };
+    const raw = {
+      MsgId: "group-hydrate-retry",
+      FromUserName: "@@retry-group",
+      ToUserName: "@me",
+      MsgType: 1,
+      Content: "@retry-member:\nhello",
+      OriginalContent: "@retry-member:<br/>hello",
+      CreateTime: 1_700_000_000
+    };
+    const hydratedKeys = new Set<string>();
+    const inFlightKeys = new Set<string>();
+
+    expect(await hydrateSparseGroupSender(raw, sparseBot, { hydratedKeys, inFlightKeys })).toBeUndefined();
+    allowHydration = true;
+    expect(await hydrateSparseGroupSender(raw, sparseBot, { hydratedKeys, inFlightKeys })).toBe(group);
+
+    const message = normalizeWechat4uMessage(raw, sparseBot);
+    expect(message?.sender.displayName).toBe("Retry Member");
+    expect(hydratedKeys.size).toBe(1);
+    expect(inFlightKeys.size).toBe(0);
   });
 });
 

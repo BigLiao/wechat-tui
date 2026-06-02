@@ -8,9 +8,12 @@ import type {
   ContactRecord,
   ConversationInput,
   ConversationRecord,
+  GroupMemberInput,
+  GroupMemberRecord,
   MessageInput,
   MessageKind,
   MessageRecord,
+  MessageSenderKind,
   MessageStore,
   SearchResult,
   UserProfile
@@ -28,6 +31,7 @@ import {
   normalizeComparableGroupName,
   normalizeComparableText
 } from "../util/group-name.js";
+import { conversationIdFromContact, groupMemberId } from "../util/ids.js";
 import { loadNodeSqlite } from "../util/node-sqlite.js";
 import { cleanText } from "../util/text.js";
 
@@ -59,12 +63,28 @@ interface ConversationRow {
   updated_at: number;
 }
 
+interface GroupMemberRow {
+  account_id: string | null;
+  id: string;
+  group_id: string;
+  group_protocol_id: string | null;
+  member_protocol_id: string;
+  display_name: string;
+  remark_name: string | null;
+  nick_name: string | null;
+  alias: string | null;
+  raw_json: string | null;
+  updated_at: number;
+}
+
 interface MessageRow {
   account_id: string | null;
   id: string;
   conversation_id: string;
   protocol_message_id: string | null;
   sender_id: string | null;
+  sender_kind: MessageSenderKind | null;
+  sender_protocol_id: string | null;
   sender_name: string;
   is_self: number;
   content: string;
@@ -72,6 +92,28 @@ interface MessageRow {
   timestamp: number;
   raw_json: string | null;
   created_at: number;
+}
+
+interface ContactNameRow {
+  display_name: string;
+  remark_name: string | null;
+  nick_name: string | null;
+  alias: string | null;
+}
+
+interface UsefulContactName {
+  displayName: string;
+  remarkName?: string;
+  nickName?: string;
+  alias?: string;
+}
+
+interface LegacyGroupMessageSenderRow {
+  account_id: string | null;
+  group_id: string;
+  group_protocol_id: string | null;
+  member_protocol_id: string;
+  sender_name: string;
 }
 
 function jsonString(value: unknown): string | null {
@@ -122,12 +164,29 @@ function asConversation(row: ConversationRow): ConversationRecord {
   };
 }
 
+function asGroupMember(row: GroupMemberRow): GroupMemberRecord {
+  return {
+    id: row.id,
+    groupId: row.group_id,
+    groupProtocolId: row.group_protocol_id ?? undefined,
+    memberProtocolId: row.member_protocol_id,
+    displayName: row.display_name,
+    remarkName: row.remark_name ?? undefined,
+    nickName: row.nick_name ?? undefined,
+    alias: row.alias ?? undefined,
+    raw: parseJson(row.raw_json),
+    updatedAt: row.updated_at
+  };
+}
+
 function asMessage(row: MessageRow): MessageRecord {
   return {
     id: row.id,
     conversationId: row.conversation_id,
     protocolMessageId: row.protocol_message_id ?? undefined,
     senderId: row.sender_id ?? undefined,
+    senderKind: row.sender_kind ?? undefined,
+    senderProtocolId: row.sender_protocol_id ?? undefined,
     senderName: row.sender_name,
     isSelf: row.is_self === 1,
     content: row.content,
@@ -210,6 +269,7 @@ export class SqliteStore implements MessageStore {
     this.options.logger?.debug("clearing all data except session");
     this.db.prepare("DELETE FROM messages").run();
     this.db.prepare("DELETE FROM attachments").run();
+    this.db.prepare("DELETE FROM group_members").run();
     this.db.prepare("DELETE FROM conversations").run();
     this.db.prepare("DELETE FROM contacts").run();
     this.db.prepare("DELETE FROM accounts").run();
@@ -278,6 +338,94 @@ export class SqliteStore implements MessageStore {
       this.options.logger?.error({ err: error, count: contacts.length }, "failed to upsert contacts");
       throw error;
     }
+  }
+
+  upsertGroupMember(member: GroupMemberInput): GroupMemberRecord {
+    const accountId = this.requireActiveAccountId("upsert group member");
+    const now = Date.now();
+    const existing = this.findGroupMemberById(member.id);
+    const memberForStorage = this.enrichGroupMemberFromContact(
+      stabilizeGroupMemberForUpsert(member, existing),
+      accountId
+    );
+    this.db
+      .prepare(
+        "INSERT INTO group_members " +
+          "(account_id, id, group_id, group_protocol_id, member_protocol_id, display_name, remark_name, nick_name, alias, raw_json, updated_at) " +
+          "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
+          "ON CONFLICT(id) DO UPDATE SET " +
+          "account_id = excluded.account_id, group_id = excluded.group_id, group_protocol_id = excluded.group_protocol_id, " +
+          "member_protocol_id = excluded.member_protocol_id, display_name = excluded.display_name, " +
+          "remark_name = excluded.remark_name, nick_name = excluded.nick_name, alias = excluded.alias, " +
+          "raw_json = excluded.raw_json, updated_at = excluded.updated_at"
+      )
+      .run(
+        accountId,
+        memberForStorage.id,
+        memberForStorage.groupId,
+        memberForStorage.groupProtocolId ?? null,
+        memberForStorage.memberProtocolId,
+        memberForStorage.displayName,
+        memberForStorage.remarkName ?? null,
+        memberForStorage.nickName ?? null,
+        memberForStorage.alias ?? null,
+        jsonString(memberForStorage.raw),
+        now
+      );
+
+    const saved = this.findGroupMemberById(memberForStorage.id);
+    if (!saved) {
+      throw new Error(`Failed to save group member ${member.id}`);
+    }
+    this.backfillSenderNameFromGroupMember(saved, existing?.displayName);
+    this.options.logger?.trace(
+      {
+        id: saved.id,
+        groupId: saved.groupId,
+        groupProtocolId: saved.groupProtocolId,
+        memberProtocolId: saved.memberProtocolId,
+        displayName: saved.displayName
+      },
+      "group member upserted"
+    );
+    return saved;
+  }
+
+  private enrichGroupMemberFromContact(member: GroupMemberInput, accountId: string | null): GroupMemberInput {
+    if (isUsefulSenderName(member.displayName)) {
+      return member;
+    }
+    const contactName = this.usefulContactNameForProtocol(accountId, member.memberProtocolId);
+    if (!contactName) {
+      return member;
+    }
+    return {
+      ...member,
+      displayName: contactName.displayName,
+      remarkName: member.remarkName ?? contactName.remarkName,
+      nickName: member.nickName ?? contactName.nickName,
+      alias: member.alias ?? contactName.alias
+    };
+  }
+
+  private usefulContactNameForProtocol(accountId: string | null, protocolId: string): UsefulContactName | undefined {
+    const row = this.db
+      .prepare(
+        "SELECT display_name, remark_name, nick_name, alias FROM contacts " +
+          "WHERE account_id IS ? AND is_self = 0 AND kind = 'private' AND protocol_id = ? " +
+          `AND NOT ${unhelpfulNameSql("display_name")} ` +
+          "ORDER BY is_stale ASC, updated_at DESC LIMIT 1"
+      )
+      .get(accountId, protocolId) as ContactNameRow | undefined;
+    if (!row) {
+      return undefined;
+    }
+    return {
+      displayName: row.display_name,
+      remarkName: optionalUsefulName(row.remark_name),
+      nickName: optionalUsefulName(row.nick_name),
+      alias: optionalUsefulName(row.alias)
+    };
   }
 
   markAllContactsStale(): void {
@@ -484,11 +632,13 @@ export class SqliteStore implements MessageStore {
     try {
       this.upsertConversation(conversation);
       const now = Date.now();
+      const senderKind = message.senderKind ?? (message.isSelf ? "self" : "contact");
       const insertResult = this.db
         .prepare(
           "INSERT OR IGNORE INTO messages " +
-            "(account_id, id, conversation_id, protocol_message_id, sender_id, sender_name, is_self, content, type, timestamp, raw_json, created_at) " +
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            "(account_id, id, conversation_id, protocol_message_id, sender_id, sender_kind, sender_protocol_id, " +
+            "sender_name, is_self, content, type, timestamp, raw_json, created_at) " +
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         )
         .run(
           accountId,
@@ -496,6 +646,8 @@ export class SqliteStore implements MessageStore {
           message.conversationId,
           message.protocolMessageId ?? null,
           message.senderId ?? null,
+          senderKind,
+          message.senderProtocolId ?? null,
           message.senderName,
           message.isSelf ? 1 : 0,
           message.content,
@@ -699,6 +851,17 @@ export class SqliteStore implements MessageStore {
     return row ? asContact(row) : undefined;
   }
 
+  private findGroupMemberById(id: string): GroupMemberRecord | undefined {
+    const accountId = this.currentAccountId();
+    if (!accountId) {
+      return undefined;
+    }
+    const row = this.db.prepare("SELECT * FROM group_members WHERE account_id = ? AND id = ?").get(accountId, id) as
+      | GroupMemberRow
+      | undefined;
+    return row ? asGroupMember(row) : undefined;
+  }
+
   private findMessageById(id: string): MessageRecord | undefined {
     const accountId = this.currentAccountId();
     if (!accountId) {
@@ -777,43 +940,118 @@ export class SqliteStore implements MessageStore {
     }
   }
 
+  private backfillSenderNameFromGroupMember(member: GroupMemberRecord, previousDisplayName?: string): void {
+    const accountId = this.currentAccountId();
+    if (!accountId || !isUsefulSenderName(member.displayName)) {
+      return;
+    }
+
+    const groupConversationSql = groupConversationIdsForMemberSql();
+    const senderSql = groupMemberSenderSql();
+    const previousName = previousDisplayName && previousDisplayName !== member.displayName ? previousDisplayName : undefined;
+    const messageNameSql = nameBackfillSql("sender_name", previousName);
+    const previewNameSql = nameBackfillSql("last_message_sender_name", previousName);
+    const previousNameParams = previousName ? [previousName] : [];
+    const result = this.db
+      .prepare(
+        "UPDATE messages SET sender_name = ? WHERE account_id = ? " +
+          `AND ${messageNameSql} ` +
+          `AND conversation_id IN (${groupConversationSql}) ` +
+          `AND (${senderSql})`
+      )
+      .run(
+        member.displayName,
+        accountId,
+        ...previousNameParams,
+        accountId,
+        member.groupId,
+        member.groupProtocolId ?? null,
+        member.memberProtocolId,
+        member.id,
+        accountId,
+        member.memberProtocolId
+      );
+
+    this.db
+      .prepare(
+        "UPDATE conversations SET last_message_sender_name = ? WHERE account_id = ? " +
+          `AND ${previewNameSql} ` +
+          `AND id IN (${groupConversationSql}) ` +
+          "AND (" +
+          "SELECT " +
+          `CASE WHEN ${senderSql} THEN 1 ELSE 0 END ` +
+          "FROM messages WHERE account_id = conversations.account_id AND conversation_id = conversations.id " +
+          "ORDER BY timestamp DESC, created_at DESC LIMIT 1" +
+          ") = 1"
+      )
+      .run(
+        member.displayName,
+        accountId,
+        ...previousNameParams,
+        accountId,
+        member.groupId,
+        member.groupProtocolId ?? null,
+        member.memberProtocolId,
+        member.id,
+        accountId,
+        member.memberProtocolId
+      );
+
+    const changes = Number(result.changes);
+    if (changes > 0) {
+      this.options.logger?.debug(
+        {
+          groupId: member.groupId,
+          groupProtocolId: member.groupProtocolId,
+          memberProtocolId: member.memberProtocolId,
+          displayName: member.displayName,
+          changedMessages: changes
+        },
+        "backfilled message sender names from group member"
+      );
+    }
+  }
+
+  private backfillMissingGroupMemberSenderProtocol(member: GroupMemberRecord): number {
+    const accountId = this.currentAccountId();
+    if (!accountId) {
+      return 0;
+    }
+    const result = this.db
+      .prepare(
+        "UPDATE messages SET sender_kind = 'group-member', sender_protocol_id = ?, sender_id = ? " +
+          "WHERE account_id = ? " +
+          `AND conversation_id IN (${groupConversationIdsForMemberSql()}) ` +
+          "AND sender_id IN (SELECT id FROM contacts WHERE account_id = ? AND protocol_id = ?)"
+      )
+      .run(
+        member.memberProtocolId,
+        member.id,
+        accountId,
+        accountId,
+        member.groupId,
+        member.groupProtocolId ?? null,
+        accountId,
+        member.memberProtocolId
+      );
+    return Number(result.changes);
+  }
+
   private backfillGroupMemberSenderNamesFromContact(contact: ContactRecord): void {
     const accountId = this.currentAccountId();
     if (!accountId || contact.kind !== "group" || !contact.protocolId) {
       return;
     }
 
-    const members = groupMembersWithUsefulNames(contact.raw);
+    const members = groupMemberInputsFromContact(contact, accountId);
     if (members.length === 0) {
       return;
     }
 
-    const senderIdsSql = "SELECT id FROM contacts WHERE account_id = ? AND protocol_id = ?";
     let changedMessages = 0;
     for (const member of members) {
-      const result = this.db
-        .prepare(
-          "UPDATE messages SET sender_name = ? WHERE account_id = ? " +
-            `AND ${unhelpfulNameSql("sender_name")} ` +
-            `AND sender_id IN (${senderIdsSql}) ` +
-            "AND conversation_id IN (" +
-            "SELECT id FROM conversations WHERE account_id = ? AND kind = 'group' AND protocol_id = ?" +
-            ")"
-        )
-        .run(member.displayName, accountId, accountId, member.protocolId, accountId, contact.protocolId);
-      changedMessages += Number(result.changes);
-
-      this.db
-        .prepare(
-          "UPDATE conversations SET last_message_sender_name = ? WHERE account_id = ? " +
-            `AND ${unhelpfulNameSql("last_message_sender_name")} ` +
-            "AND kind = 'group' AND protocol_id = ? " +
-            "AND (" +
-            "SELECT sender_id FROM messages WHERE account_id = conversations.account_id AND conversation_id = conversations.id " +
-            "ORDER BY timestamp DESC, created_at DESC LIMIT 1" +
-            `) IN (${senderIdsSql})`
-        )
-        .run(member.displayName, accountId, contact.protocolId, accountId, member.protocolId);
+      const saved = this.upsertGroupMember(member);
+      changedMessages += this.backfillMissingGroupMemberSenderProtocol(saved);
     }
 
     if (changedMessages > 0) {
@@ -1087,6 +1325,222 @@ export class SqliteStore implements MessageStore {
     return this.activeAccountId;
   }
 
+  private migrateLegacyGroupMemberSenders(): void {
+    const now = Date.now();
+    const groupRows = this.db
+      .prepare("SELECT * FROM contacts WHERE kind = 'group' AND raw_json IS NOT NULL")
+      .all() as unknown as ContactRow[];
+    const findGroupMember = this.db.prepare("SELECT * FROM group_members WHERE id = ? LIMIT 1");
+    const insertGroupMember = this.db.prepare(
+      "INSERT INTO group_members " +
+        "(account_id, id, group_id, group_protocol_id, member_protocol_id, display_name, remark_name, nick_name, alias, raw_json, updated_at) " +
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
+        "ON CONFLICT(id) DO UPDATE SET " +
+        "account_id = excluded.account_id, group_id = excluded.group_id, group_protocol_id = excluded.group_protocol_id, " +
+        "member_protocol_id = excluded.member_protocol_id, display_name = excluded.display_name, " +
+        "remark_name = excluded.remark_name, nick_name = excluded.nick_name, alias = excluded.alias, " +
+        "raw_json = excluded.raw_json, updated_at = excluded.updated_at"
+    );
+    const insertMigratedGroupMember = (accountId: string | null, member: GroupMemberInput): void => {
+      const existingRow = findGroupMember.get(member.id) as GroupMemberRow | undefined;
+      const existing = existingRow ? asGroupMember(existingRow) : undefined;
+      const memberForStorage = this.enrichGroupMemberFromContact(
+        stabilizeGroupMemberForUpsert(member, existing),
+        accountId
+      );
+      insertGroupMember.run(
+        accountId,
+        memberForStorage.id,
+        memberForStorage.groupId,
+        memberForStorage.groupProtocolId ?? null,
+        memberForStorage.memberProtocolId,
+        memberForStorage.displayName,
+        memberForStorage.remarkName ?? null,
+        memberForStorage.nickName ?? null,
+        memberForStorage.alias ?? null,
+        jsonString(memberForStorage.raw),
+        now
+      );
+    };
+    for (const row of groupRows) {
+      const group = asContact(row);
+      for (const member of groupMemberInputsFromContact(group, row.account_id)) {
+        insertMigratedGroupMember(row.account_id, member);
+      }
+    }
+
+    this.db.exec(`
+      UPDATE messages
+      SET sender_kind = CASE WHEN is_self = 1 THEN 'self' ELSE 'contact' END
+      WHERE sender_kind IS NULL;
+
+      UPDATE messages
+      SET sender_protocol_id = (
+        SELECT contacts.protocol_id
+        FROM contacts
+        WHERE contacts.account_id IS messages.account_id
+          AND contacts.id = messages.sender_id
+          AND contacts.protocol_id IS NOT NULL
+        LIMIT 1
+      )
+      WHERE sender_protocol_id IS NULL
+        AND sender_id IS NOT NULL
+        AND EXISTS (
+          SELECT 1
+          FROM contacts
+          WHERE contacts.account_id IS messages.account_id
+            AND contacts.id = messages.sender_id
+            AND contacts.protocol_id IS NOT NULL
+        );
+
+      UPDATE messages
+      SET sender_kind = 'group-member'
+      WHERE is_self = 0
+        AND sender_protocol_id IS NOT NULL
+        AND conversation_id IN (
+          SELECT id FROM conversations WHERE conversations.account_id IS messages.account_id AND kind = 'group'
+        );
+    `);
+
+    const legacyGroupSenders = this.db
+      .prepare(
+        "SELECT DISTINCT messages.account_id, conversations.id AS group_id, " +
+          "conversations.protocol_id AS group_protocol_id, messages.sender_protocol_id AS member_protocol_id, " +
+          "messages.sender_name " +
+          "FROM messages " +
+          "JOIN conversations ON conversations.account_id IS messages.account_id " +
+          "AND conversations.id = messages.conversation_id AND conversations.kind = 'group' " +
+          "WHERE messages.sender_kind = 'group-member' AND messages.sender_protocol_id IS NOT NULL"
+      )
+      .all() as unknown as LegacyGroupMessageSenderRow[];
+    for (const row of legacyGroupSenders) {
+      const displayName = firstUsefulGroupMemberName(row.sender_name) ?? "Group member";
+      insertMigratedGroupMember(row.account_id, {
+        id: groupMemberId(row.group_id, row.member_protocol_id),
+        groupId: row.group_id,
+        groupProtocolId: row.group_protocol_id ?? undefined,
+        memberProtocolId: row.member_protocol_id,
+        displayName
+      });
+    }
+
+    this.db.exec(`
+      UPDATE messages
+      SET sender_id = (
+        SELECT group_members.id
+        FROM group_members
+        JOIN conversations ON conversations.account_id IS messages.account_id
+          AND conversations.id = messages.conversation_id
+        WHERE group_members.account_id IS messages.account_id
+          AND group_members.member_protocol_id = messages.sender_protocol_id
+          AND (group_members.group_id = conversations.id OR group_members.group_protocol_id = conversations.protocol_id)
+        LIMIT 1
+      )
+      WHERE sender_kind = 'group-member'
+        AND sender_protocol_id IS NOT NULL
+        AND EXISTS (
+          SELECT 1
+          FROM group_members
+          JOIN conversations ON conversations.account_id IS messages.account_id
+            AND conversations.id = messages.conversation_id
+          WHERE group_members.account_id IS messages.account_id
+            AND group_members.member_protocol_id = messages.sender_protocol_id
+            AND (group_members.group_id = conversations.id OR group_members.group_protocol_id = conversations.protocol_id)
+        );
+
+      UPDATE messages
+      SET sender_name = (
+        SELECT group_members.display_name
+        FROM group_members
+        JOIN conversations ON conversations.account_id IS messages.account_id
+          AND conversations.id = messages.conversation_id
+        WHERE group_members.account_id IS messages.account_id
+          AND group_members.member_protocol_id = messages.sender_protocol_id
+          AND (group_members.group_id = conversations.id OR group_members.group_protocol_id = conversations.protocol_id)
+        LIMIT 1
+      )
+      WHERE sender_kind = 'group-member'
+        AND (
+          ${unhelpfulNameSql("sender_name")}
+          OR sender_name = (
+            SELECT contacts.display_name
+            FROM contacts
+            WHERE contacts.account_id IS messages.account_id
+              AND contacts.kind = 'private'
+              AND contacts.protocol_id = messages.sender_protocol_id
+              AND NOT ${unhelpfulNameSql("contacts.display_name")}
+            ORDER BY contacts.is_stale ASC, contacts.updated_at DESC
+            LIMIT 1
+          )
+        )
+        AND sender_protocol_id IS NOT NULL
+        AND EXISTS (
+          SELECT 1
+          FROM group_members
+          JOIN conversations ON conversations.account_id IS messages.account_id
+            AND conversations.id = messages.conversation_id
+          WHERE group_members.account_id IS messages.account_id
+            AND group_members.member_protocol_id = messages.sender_protocol_id
+            AND (group_members.group_id = conversations.id OR group_members.group_protocol_id = conversations.protocol_id)
+            AND NOT ${unhelpfulNameSql("group_members.display_name")}
+        );
+
+      UPDATE conversations
+      SET last_message_sender_name = (
+        SELECT latest.sender_name
+        FROM messages AS latest
+        WHERE latest.account_id IS conversations.account_id
+          AND latest.conversation_id = conversations.id
+        ORDER BY latest.timestamp DESC, latest.created_at DESC
+        LIMIT 1
+      )
+      WHERE (
+          last_message_sender_name IS NULL
+          OR ${unhelpfulNameSql("last_message_sender_name")}
+          OR last_message_sender_name != (
+            SELECT latest.sender_name
+            FROM messages AS latest
+            WHERE latest.account_id IS conversations.account_id
+              AND latest.conversation_id = conversations.id
+            ORDER BY latest.timestamp DESC, latest.created_at DESC
+            LIMIT 1
+          )
+        )
+        AND (
+          SELECT CASE WHEN NOT ${unhelpfulNameSql("latest.sender_name")} THEN 1 ELSE 0 END
+          FROM messages AS latest
+          WHERE latest.account_id IS conversations.account_id
+            AND latest.conversation_id = conversations.id
+          ORDER BY latest.timestamp DESC, latest.created_at DESC
+          LIMIT 1
+        ) = 1;
+
+      UPDATE contacts
+      SET is_stale = 1
+      WHERE is_self = 0
+        AND kind = 'private'
+        AND (display_name = 'Group member' OR display_name LIKE '@%')
+        AND (
+          id IN (
+            SELECT messages.sender_id
+            FROM messages
+            JOIN conversations ON conversations.account_id IS messages.account_id
+              AND conversations.id = messages.conversation_id
+              AND conversations.kind = 'group'
+            WHERE messages.sender_id IS NOT NULL
+          )
+          OR protocol_id IN (
+            SELECT messages.sender_protocol_id
+            FROM messages
+            JOIN conversations ON conversations.account_id IS messages.account_id
+              AND conversations.id = messages.conversation_id
+              AND conversations.kind = 'group'
+            WHERE messages.sender_protocol_id IS NOT NULL
+          )
+        );
+    `);
+  }
+
   private migrate(): void {
     this.options.logger?.debug("running sqlite migrations");
     this.db.exec(`
@@ -1135,12 +1589,28 @@ export class SqliteStore implements MessageStore {
         updated_at INTEGER NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS group_members (
+        account_id TEXT,
+        id TEXT PRIMARY KEY,
+        group_id TEXT NOT NULL,
+        group_protocol_id TEXT,
+        member_protocol_id TEXT NOT NULL,
+        display_name TEXT NOT NULL,
+        remark_name TEXT,
+        nick_name TEXT,
+        alias TEXT,
+        raw_json TEXT,
+        updated_at INTEGER NOT NULL
+      );
+
       CREATE TABLE IF NOT EXISTS messages (
         account_id TEXT,
         id TEXT PRIMARY KEY,
         conversation_id TEXT NOT NULL,
         protocol_message_id TEXT,
         sender_id TEXT,
+        sender_kind TEXT,
+        sender_protocol_id TEXT,
         sender_name TEXT NOT NULL,
         is_self INTEGER NOT NULL,
         content TEXT NOT NULL,
@@ -1172,17 +1642,23 @@ export class SqliteStore implements MessageStore {
     this.ensureColumn("conversations", "last_message_sender_name", "TEXT");
     this.ensureColumn("conversations", "last_message_is_self", "INTEGER");
     this.ensureColumn("messages", "account_id", "TEXT");
+    this.ensureColumn("messages", "sender_kind", "TEXT");
+    this.ensureColumn("messages", "sender_protocol_id", "TEXT");
     this.ensureColumn("attachments", "account_id", "TEXT");
     this.db.exec(`
       CREATE INDEX IF NOT EXISTS idx_contacts_account_display_name ON contacts(account_id, display_name);
       CREATE INDEX IF NOT EXISTS idx_contacts_account_protocol_id ON contacts(account_id, protocol_id);
+      CREATE INDEX IF NOT EXISTS idx_group_members_account_group ON group_members(account_id, group_id);
+      CREATE INDEX IF NOT EXISTS idx_group_members_account_member_protocol ON group_members(account_id, member_protocol_id);
       CREATE INDEX IF NOT EXISTS idx_conversations_account_protocol_id ON conversations(account_id, protocol_id);
       CREATE INDEX IF NOT EXISTS idx_conversations_account_last_message_at ON conversations(account_id, last_message_at);
       CREATE INDEX IF NOT EXISTS idx_conversations_account_unread_count ON conversations(account_id, unread_count);
       CREATE INDEX IF NOT EXISTS idx_messages_account_conversation_time ON messages(account_id, conversation_id, timestamp);
+      CREATE INDEX IF NOT EXISTS idx_messages_account_sender_protocol ON messages(account_id, sender_protocol_id);
       CREATE INDEX IF NOT EXISTS idx_messages_account_content ON messages(account_id, content);
       CREATE INDEX IF NOT EXISTS idx_attachments_account_message_id ON attachments(account_id, message_id);
     `);
+    this.migrateLegacyGroupMemberSenders();
     this.options.logger?.debug("sqlite migrations complete");
   }
 
@@ -1200,16 +1676,35 @@ function isUsefulSenderName(value: string | undefined): value is string {
   return !!value && value !== "Unknown" && value !== "Group member" && !value.startsWith("@");
 }
 
+function optionalUsefulName(value: string | null): string | undefined {
+  return isUsefulSenderName(value ?? undefined) ? value ?? undefined : undefined;
+}
+
 function isMergeableContactKind(kind: ContactKind): boolean {
   return kind === "private" || kind === "group";
 }
 
-function unhelpfulNameSql(column: "sender_name" | "last_message_sender_name" | "title"): string {
+function unhelpfulNameSql(column: string): string {
   return `(${column} = 'Unknown' OR ${column} = 'Group member' OR ${column} LIKE '@%')`;
+}
+
+function nameBackfillSql(column: string, previousName: string | undefined): string {
+  return previousName ? `(${unhelpfulNameSql(column)} OR ${column} = ?)` : unhelpfulNameSql(column);
 }
 
 function senderIdsForContactSql(): string {
   return "SELECT ? AS id UNION SELECT id FROM contacts WHERE account_id = ? AND protocol_id = ?";
+}
+
+function groupConversationIdsForMemberSql(): string {
+  return "SELECT id FROM conversations WHERE account_id = ? AND kind = 'group' AND (id = ? OR protocol_id = ?)";
+}
+
+function groupMemberSenderSql(): string {
+  return (
+    "sender_protocol_id = ? OR sender_id = ? OR " +
+    "sender_id IN (SELECT id FROM contacts WHERE account_id = ? AND protocol_id = ?)"
+  );
 }
 
 function stabilizeContactForUpsert(contact: ContactInput, existing: ContactRecord | undefined): ContactInput {
@@ -1233,24 +1728,41 @@ function stabilizeContactForUpsert(contact: ContactInput, existing: ContactRecor
   };
 }
 
-interface UsefulGroupMember {
-  protocolId: string;
-  displayName: string;
+function stabilizeGroupMemberForUpsert(member: GroupMemberInput, existing: GroupMemberRecord | undefined): GroupMemberInput {
+  const raw = member.raw ?? existing?.raw;
+  if (!existing || isUsefulSenderName(member.displayName) || !isUsefulSenderName(existing.displayName)) {
+    return {
+      ...member,
+      groupProtocolId: member.groupProtocolId ?? existing?.groupProtocolId,
+      raw
+    };
+  }
+
+  return {
+    ...member,
+    groupProtocolId: member.groupProtocolId ?? existing.groupProtocolId,
+    displayName: existing.displayName,
+    remarkName: member.remarkName ?? existing.remarkName,
+    nickName: member.nickName ?? existing.nickName,
+    alias: member.alias ?? existing.alias,
+    raw
+  };
 }
 
 const CONTACT_NAME_FIELDS = ["displayName", "remarkName", "nickName", "alias"] as const;
 
-function groupMembersWithUsefulNames(raw: unknown): UsefulGroupMember[] {
-  if (!raw || typeof raw !== "object") {
+function groupMemberInputsFromContact(contact: Pick<ContactRecord, "id" | "protocolId" | "raw">, accountId?: string | null): GroupMemberInput[] {
+  if (!contact.raw || typeof contact.raw !== "object") {
     return [];
   }
-  const memberList = (raw as { MemberList?: unknown }).MemberList;
+  const memberList = (contact.raw as { MemberList?: unknown }).MemberList;
   if (!Array.isArray(memberList)) {
     return [];
   }
 
-  const members: UsefulGroupMember[] = [];
+  const members: GroupMemberInput[] = [];
   const seen = new Set<string>();
+  const groupId = groupConversationIdFromContact(contact, accountId);
   for (const member of memberList) {
     if (!member || typeof member !== "object") {
       continue;
@@ -1270,9 +1782,29 @@ function groupMembersWithUsefulNames(raw: unknown): UsefulGroupMember[] {
       continue;
     }
     seen.add(protocolId);
-    members.push({ protocolId, displayName });
+    members.push({
+      id: groupMemberId(groupId, protocolId),
+      groupId,
+      groupProtocolId: contact.protocolId,
+      memberProtocolId: protocolId,
+      displayName,
+      remarkName: cleanGroupMemberName(record.RemarkName),
+      nickName: cleanGroupMemberName(record.NickName),
+      alias: cleanGroupMemberName(record.Alias),
+      raw: member
+    });
   }
   return members;
+}
+
+function groupConversationIdFromContact(contact: Pick<ContactRecord, "id">, accountId?: string | null): string {
+  if (accountId) {
+    const accountPrefix = `${accountId}:`;
+    if (contact.id.startsWith(accountPrefix)) {
+      return `${accountId}:${conversationIdFromContact({ id: contact.id.slice(accountPrefix.length) })}`;
+    }
+  }
+  return conversationIdFromContact(contact);
 }
 
 function cleanGroupMemberProtocolId(value: unknown): string | undefined {

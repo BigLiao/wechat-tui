@@ -77,6 +77,8 @@ export interface MessageRecord {
   conversationId: string;
   protocolMessageId?: string;
   senderId?: string;
+  senderKind?: MessageSenderKind;
+  senderProtocolId?: string;
   senderName: string;
   isSelf: boolean;
   content: string;
@@ -91,6 +93,8 @@ export interface MessageInput {
   conversationId: string;
   protocolMessageId?: string;
   senderId?: string;
+  senderKind?: MessageSenderKind;
+  senderProtocolId?: string;
   senderName: string;
   isSelf: boolean;
   content: string;
@@ -121,6 +125,33 @@ export interface IncomingProtocolMessage {
   content: string;
   type: MessageKind;
   timestamp: number;
+  raw?: unknown;
+}
+
+export type MessageSenderKind = "self" | "contact" | "group-member" | "unknown";
+
+export interface GroupMemberRecord {
+  id: string;
+  groupId: string;
+  groupProtocolId?: string;
+  memberProtocolId: string;
+  displayName: string;
+  remarkName?: string;
+  nickName?: string;
+  alias?: string;
+  raw?: unknown;
+  updatedAt: number;
+}
+
+export interface GroupMemberInput {
+  id: string;
+  groupId: string;
+  groupProtocolId?: string;
+  memberProtocolId: string;
+  displayName: string;
+  remarkName?: string;
+  nickName?: string;
+  alias?: string;
   raw?: unknown;
 }
 
@@ -221,6 +252,7 @@ export interface MessageStore {
   clearData(): void;
   upsertContact(contact: ContactInput): ContactRecord;
   upsertContacts(contacts: ContactInput[]): ContactRecord[];
+  upsertGroupMember(member: GroupMemberInput): GroupMemberRecord;
   markAllContactsStale(): void;
   listContacts(kind?: ContactKind, limit?: number): ContactRecord[];
   findContactByName(query: string): ContactRecord | undefined;

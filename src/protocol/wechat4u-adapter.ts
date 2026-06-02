@@ -38,6 +38,7 @@ type RawWechatBot = EventEmitter & {
   getVideo?: (msgId: string) => Promise<{ data: ArrayBuffer; type: string }>;
   getVoice?: (msgId: string) => Promise<{ data: ArrayBuffer; type: string }>;
   getDoc?: (fromUserName: string, mediaId: string, fileName: string) => Promise<{ data: ArrayBuffer; type: string }>;
+  batchGetContact?: (contacts: RawContact[]) => Promise<RawContact[]>;
 };
 
 interface RawContact {
@@ -51,6 +52,8 @@ interface RawContact {
   RemarkPYQuanPin?: string;
   MemberCount?: number;
   MemberList?: RawContact[];
+  EncryChatRoomId?: string;
+  ChatRoomId?: number | string;
   VerifyFlag?: number;
   KeyWord?: string;
   isSelf?: boolean;
@@ -90,6 +93,8 @@ export interface Wechat4uAdapterOptions {
 export class Wechat4uAdapter extends EventEmitter implements WeChatProtocol {
   private bot?: RawWechatBot;
   private user?: UserProfile;
+  private readonly hydratedGroupSenderKeys = new Set<string>();
+  private readonly inFlightGroupSenderHydrationKeys = new Set<string>();
 
   constructor(private readonly options: Wechat4uAdapterOptions = {}) {
     super();
@@ -319,20 +324,7 @@ export class Wechat4uAdapter extends EventEmitter implements WeChatProtocol {
     });
 
     bot.on("message", (message: RawMessage) => {
-      try {
-        this.cacheCurrentUserFromBot(bot, "message event");
-        this.options.logger?.debug({ raw: summarizeRawWechatMessage(message) }, "wechat4u raw message received");
-        const normalized = normalizeWechat4uMessage(message, bot);
-        if (normalized) {
-          this.options.logger?.debug({ message: summarizeIncomingMessage(normalized) }, "wechat4u message normalized");
-          this.emit("message", normalized);
-        } else {
-          this.options.logger?.debug({ raw: summarizeRawWechatMessage(message) }, "wechat4u message dropped by adapter");
-        }
-      } catch (error) {
-        this.options.logger?.error({ err: error, message }, "failed to normalize wechat4u message");
-        this.emit("error", error instanceof Error ? error : new Error(String(error)));
-      }
+      this.handleBotMessage(bot, message);
     });
 
     bot.on("logout", () => {
@@ -371,6 +363,34 @@ export class Wechat4uAdapter extends EventEmitter implements WeChatProtocol {
       );
     }
     return this.user;
+  }
+
+  private handleBotMessage(bot: RawWechatBot, message: RawMessage): void {
+    try {
+      this.cacheCurrentUserFromBot(bot, "message event");
+      this.options.logger?.debug({ raw: summarizeRawWechatMessage(message) }, "wechat4u raw message received");
+      void hydrateSparseGroupSender(message, bot, {
+        logger: this.options.logger,
+        hydratedKeys: this.hydratedGroupSenderKeys,
+        inFlightKeys: this.inFlightGroupSenderHydrationKeys
+      }).then((hydratedGroup) => {
+        if (hydratedGroup) {
+          this.emit("contacts", [normalizeContact(hydratedGroup, bot.user)]);
+        }
+      }).catch((error) => {
+        this.options.logger?.debug({ err: error }, "background sparse group sender hydration failed");
+      });
+      const normalized = normalizeWechat4uMessage(message, bot);
+      if (normalized) {
+        this.options.logger?.debug({ message: summarizeIncomingMessage(normalized) }, "wechat4u message normalized");
+        this.emit("message", normalized);
+      } else {
+        this.options.logger?.debug({ raw: summarizeRawWechatMessage(message) }, "wechat4u message dropped by adapter");
+      }
+    } catch (error) {
+      this.options.logger?.error({ err: error, message }, "failed to normalize wechat4u message");
+      this.emit("error", error instanceof Error ? error : new Error(String(error)));
+    }
   }
 }
 
@@ -463,6 +483,165 @@ export function normalizeWechat4uMessage(rawInput: unknown, botInput: unknown): 
     timestamp,
     raw
   };
+}
+
+interface HydrateSparseGroupSenderOptions {
+  logger?: Logger;
+  hydratedKeys?: Set<string>;
+  inFlightKeys?: Set<string>;
+}
+
+export async function hydrateSparseGroupSender(
+  rawInput: unknown,
+  botInput: unknown,
+  options: HydrateSparseGroupSenderOptions = {}
+): Promise<RawContact | undefined> {
+  const raw = rawInput as RawMessage;
+  const bot = botInput as RawWechatBot;
+  if (!bot.batchGetContact) {
+    return undefined;
+  }
+
+  const target = sparseGroupSenderHydrationTarget(raw, bot);
+  if (!target) {
+    return undefined;
+  }
+
+  const candidates = groupRoomIdCandidates(target.groupRaw, target.conversationProtocolId);
+  const fetchKey = `${target.conversationProtocolId}:${target.senderProtocolId}`;
+  if (options.hydratedKeys?.has(fetchKey) || options.inFlightKeys?.has(fetchKey)) {
+    return undefined;
+  }
+  options.inFlightKeys?.add(fetchKey);
+
+  try {
+    for (const encryChatRoomId of candidates) {
+      try {
+        const contacts = await bot.batchGetContact([
+          {
+            UserName: target.senderProtocolId,
+            EncryChatRoomId: encryChatRoomId
+          }
+        ]);
+        const hydrated = contacts.find((contact) => contact.UserName === target.senderProtocolId);
+        if (!hydrated || !rawContactHasUsefulGroupSenderName(hydrated)) {
+          continue;
+        }
+        mergeGroupMemberIntoRaw(target.groupRaw, hydrated);
+        options.hydratedKeys?.add(fetchKey);
+        options.logger?.debug(
+          {
+            groupProtocolId: target.conversationProtocolId,
+            senderProtocolId: target.senderProtocolId,
+            hasEncryChatRoomId: encryChatRoomId.length > 0
+          },
+          "hydrated sparse group sender"
+        );
+        return target.groupRaw;
+      } catch (error) {
+        options.logger?.debug(
+          {
+            err: error,
+            groupProtocolId: target.conversationProtocolId,
+            senderProtocolId: target.senderProtocolId,
+            hasEncryChatRoomId: encryChatRoomId.length > 0
+          },
+          "failed to hydrate sparse group sender"
+        );
+      }
+    }
+    return undefined;
+  } finally {
+    options.inFlightKeys?.delete(fetchKey);
+  }
+}
+
+interface SparseGroupSenderHydrationTarget {
+  conversationProtocolId: string;
+  senderProtocolId: string;
+  groupRaw: RawContact;
+}
+
+function sparseGroupSenderHydrationTarget(raw: RawMessage, bot: RawWechatBot): SparseGroupSenderHydrationTarget | undefined {
+  if (isInternalProtocolMessage(raw, bot)) {
+    return undefined;
+  }
+
+  const from = raw.FromUserName;
+  const to = raw.ToUserName;
+  const selfProtocolId = bot.user?.UserName;
+  const isSelf = raw.isSendBySelf === true || (!!selfProtocolId && from === selfProtocolId);
+  if (isSelf) {
+    return undefined;
+  }
+
+  const conversationProtocolId = raw.getPeerUserName?.() ?? from;
+  if (!conversationProtocolId) {
+    return undefined;
+  }
+
+  const groupRaw = bot.contacts?.[conversationProtocolId] ?? ({ UserName: conversationProtocolId } satisfies RawContact);
+  const conversationContact = normalizeContact(groupRaw, bot.user);
+  if (conversationContact.kind !== "group") {
+    return undefined;
+  }
+
+  const parsedContent = parseMessageContent(raw, conversationContact, false);
+  const senderProtocolId = parsedContent.senderProtocolId ?? raw.ActualUserName;
+  if (!senderProtocolId || !senderProtocolId.startsWith("@") || senderProtocolId.startsWith("@@")) {
+    return undefined;
+  }
+
+  const member = groupRaw.MemberList?.find((item) => item.UserName === senderProtocolId);
+  if (
+    rawContactHasUsefulGroupSenderName(member) ||
+    rawContactHasUsefulGroupSenderName(bot.contacts?.[senderProtocolId]) ||
+    !!parsedContent.senderDisplayName ||
+    !!cleanGroupSenderDisplayName(raw.ActualNickName)
+  ) {
+    return undefined;
+  }
+
+  return {
+    conversationProtocolId,
+    senderProtocolId,
+    groupRaw
+  };
+}
+
+function rawContactHasUsefulGroupSenderName(contact: RawContact | undefined): boolean {
+  return !!firstUsefulGroupSenderName(
+    contact?.getDisplayName?.(),
+    contact?.RemarkName,
+    contact?.DisplayName,
+    contact?.NickName,
+    contact?.Alias
+  );
+}
+
+function groupRoomIdCandidates(groupRaw: RawContact, conversationProtocolId: string): string[] {
+  const candidates = [
+    cleanRawString(groupRaw.EncryChatRoomId),
+    cleanRawString(groupRaw.UserName),
+    conversationProtocolId,
+    ""
+  ];
+  return Array.from(new Set(candidates.filter((candidate): candidate is string => candidate !== undefined)));
+}
+
+function mergeGroupMemberIntoRaw(groupRaw: RawContact, member: RawContact): void {
+  const memberList = Array.isArray(groupRaw.MemberList) ? groupRaw.MemberList : [];
+  const existingIndex = memberList.findIndex((item) => item.UserName === member.UserName);
+  if (existingIndex >= 0) {
+    memberList[existingIndex] = {
+      ...memberList[existingIndex],
+      ...member
+    };
+  } else {
+    memberList.push(member);
+  }
+  groupRaw.MemberList = memberList;
+  groupRaw.MemberCount = Math.max(Number(groupRaw.MemberCount ?? 0), memberList.length);
 }
 
 function isInternalProtocolMessage(raw: RawMessage, bot: RawWechatBot): boolean {

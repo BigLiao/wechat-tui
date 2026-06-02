@@ -18,6 +18,10 @@ export function contactId(kind: ContactKind, identityParts: Array<string | undef
   return stableId(`contact:${kind}`, identityParts);
 }
 
+export function groupMemberId(groupId: string, memberProtocolId: string): string {
+  return stableId("group-member", [groupId, memberProtocolId]);
+}
+
 export function conversationIdFromContact(contact: Pick<ContactInput, "id">): string {
   return `conversation:${contact.id}`;
 }

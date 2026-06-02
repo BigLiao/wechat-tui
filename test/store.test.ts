@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
 import { SqliteStore } from "../src/store/sqlite-store.js";
-import { contactId, conversationFromContact, localMessageId } from "../src/util/ids.js";
+import { contactId, conversationFromContact, groupMemberId, localMessageId } from "../src/util/ids.js";
 import type { ContactInput, UserProfile } from "../src/types.js";
 
 const tempDirs: string[] = [];
@@ -312,6 +312,214 @@ describe("SqliteStore", () => {
     expect(store.findConversationById(conversation.id)?.lastMessageSenderName).toBe("Alice in Project");
     expect(store.listMessages(otherConversation.id)[0]?.senderName).toBe("Group member");
     expect(store.findConversationById(otherConversation.id)?.lastMessageSenderName).toBe("Group member");
+    store.close();
+  });
+
+  it("migrates legacy group member contacts into group message senders", () => {
+    const dbPath = tempDb();
+    const store = new SqliteStore(dbPath);
+    store.setActiveAccount(accountA);
+    const leakedMember: ContactInput = {
+      id: contactId("private", ["@alice"]),
+      protocolId: "@alice",
+      kind: "private",
+      displayName: "Group member"
+    };
+    const group: ContactInput = {
+      id: contactId("group", ["project"]),
+      protocolId: "@@project",
+      kind: "group",
+      displayName: "Project",
+      raw: {
+        UserName: "@@project",
+        MemberList: [
+          {
+            UserName: "@alice",
+            DisplayName: "Alice in Project",
+            NickName: "Alice"
+          }
+        ]
+      }
+    };
+    const conversation = conversationFromContact(group);
+
+    store.upsertContact(leakedMember);
+    store.upsertContact(group);
+    store.saveMessage(
+      {
+        id: localMessageId([conversation.id, leakedMember.id, "legacy hello"]),
+        conversationId: conversation.id,
+        senderId: leakedMember.id,
+        senderName: "Group member",
+        isSelf: false,
+        content: "legacy hello",
+        type: "text",
+        timestamp: 1_700_000_000_000
+      },
+      conversation,
+      true
+    );
+    store.close();
+
+    const reopened = new SqliteStore(dbPath);
+    reopened.setActiveAccount(accountA);
+    const message = reopened.listMessages(conversation.id)[0];
+    expect(message?.senderId).toBe(groupMemberId(conversation.id, "@alice"));
+    expect(message?.senderKind).toBe("group-member");
+    expect(message?.senderProtocolId).toBe("@alice");
+    expect(message?.senderName).toBe("Alice in Project");
+    expect(reopened.findConversationById(conversation.id)?.lastMessageSenderName).toBe("Alice in Project");
+    expect(reopened.searchContacts("Group member")).toHaveLength(0);
+    reopened.close();
+  });
+
+  it("uses hidden private contact names as fallback group member names", () => {
+    const dbPath = tempDb();
+    const store = new SqliteStore(dbPath);
+    store.setActiveAccount(accountA);
+    const leakedMember: ContactInput = {
+      id: contactId("private", ["@alice"]),
+      protocolId: "@alice",
+      kind: "private",
+      displayName: "Alice Contact",
+      nickName: "Group member"
+    };
+    const group: ContactInput = {
+      id: contactId("group", ["project"]),
+      protocolId: "@@project",
+      kind: "group",
+      displayName: "Project",
+      raw: {
+        UserName: "@@project",
+        MemberList: [
+          {
+            UserName: "@alice",
+            DisplayName: "",
+            NickName: ""
+          }
+        ]
+      }
+    };
+    const conversation = conversationFromContact(group);
+
+    store.upsertContact(leakedMember);
+    store.upsertContact(group);
+    store.markAllContactsStale();
+    store.saveMessage(
+      {
+        id: localMessageId([conversation.id, leakedMember.id, "legacy unnamed"]),
+        conversationId: conversation.id,
+        senderId: leakedMember.id,
+        senderName: "Group member",
+        isSelf: false,
+        content: "legacy unnamed",
+        type: "text",
+        timestamp: 1_700_000_000_000
+      },
+      conversation,
+      true
+    );
+    store.close();
+
+    const reopened = new SqliteStore(dbPath);
+    reopened.setActiveAccount(accountA);
+    const message = reopened.listMessages(conversation.id)[0];
+    expect(message?.senderId).toBe(groupMemberId(conversation.id, "@alice"));
+    expect(message?.senderKind).toBe("group-member");
+    expect(message?.senderProtocolId).toBe("@alice");
+    expect(message?.senderName).toBe("Alice Contact");
+    expect(reopened.findConversationById(conversation.id)?.lastMessageSenderName).toBe("Alice Contact");
+    expect(reopened.searchContacts("Alice Contact")).toHaveLength(0);
+    reopened.close();
+  });
+
+  it("enriches sparse group member upserts from hidden private contact names", () => {
+    const store = new SqliteStore(tempDb());
+    store.setActiveAccount(accountA);
+    const leakedMember: ContactInput = {
+      id: contactId("private", ["@alice"]),
+      protocolId: "@alice",
+      kind: "private",
+      displayName: "Alice Contact",
+      nickName: "Group member"
+    };
+    const group: ContactInput = {
+      id: contactId("group", ["project"]),
+      protocolId: "@@project",
+      kind: "group",
+      displayName: "Project"
+    };
+    const conversation = conversationFromContact(group);
+
+    store.upsertContact(leakedMember);
+    store.markAllContactsStale();
+    const member = store.upsertGroupMember({
+      id: groupMemberId(conversation.id, "@alice"),
+      groupId: conversation.id,
+      groupProtocolId: group.protocolId,
+      memberProtocolId: "@alice",
+      displayName: "Group member"
+    });
+
+    expect(member.displayName).toBe("Alice Contact");
+    expect(store.searchContacts("Alice Contact")).toHaveLength(0);
+    store.close();
+  });
+
+  it("replaces hidden contact fallback group member names with richer group metadata", () => {
+    const store = new SqliteStore(tempDb());
+    store.setActiveAccount(accountA);
+    const leakedMember: ContactInput = {
+      id: contactId("private", ["@alice"]),
+      protocolId: "@alice",
+      kind: "private",
+      displayName: "Alice Contact",
+      nickName: "Group member"
+    };
+    const group: ContactInput = {
+      id: contactId("group", ["project"]),
+      protocolId: "@@project",
+      kind: "group",
+      displayName: "Project"
+    };
+    const conversation = conversationFromContact(group);
+
+    store.upsertContact(leakedMember);
+    store.markAllContactsStale();
+    const fallbackMember = store.upsertGroupMember({
+      id: groupMemberId(conversation.id, "@alice"),
+      groupId: conversation.id,
+      groupProtocolId: group.protocolId,
+      memberProtocolId: "@alice",
+      displayName: "Group member"
+    });
+    store.saveMessage(
+      {
+        id: localMessageId([conversation.id, "@alice", "fallback name"]),
+        conversationId: conversation.id,
+        senderId: fallbackMember.id,
+        senderKind: "group-member",
+        senderProtocolId: "@alice",
+        senderName: fallbackMember.displayName,
+        isSelf: false,
+        content: "fallback name",
+        type: "text",
+        timestamp: 1_700_000_000_000
+      },
+      conversation,
+      true
+    );
+
+    store.upsertGroupMember({
+      id: groupMemberId(conversation.id, "@alice"),
+      groupId: conversation.id,
+      groupProtocolId: group.protocolId,
+      memberProtocolId: "@alice",
+      displayName: "Alice in Project"
+    });
+
+    expect(store.listMessages(conversation.id)[0]?.senderName).toBe("Alice in Project");
+    expect(store.findConversationById(conversation.id)?.lastMessageSenderName).toBe("Alice in Project");
     store.close();
   });
 

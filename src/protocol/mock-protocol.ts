@@ -105,7 +105,14 @@ export class MockProtocol extends EventEmitter implements WeChatProtocol {
       throw new Error(`Unknown mock contact ${contactName}`);
     }
     const conversation = conversationFromContact(contact);
-    const sender = contact.kind === "group" ? { ...contact, displayName: "Mock Member" } : contact;
+    const sender: ContactInput = contact.kind === "group"
+      ? {
+          id: contactId("private", ["@mock-member"]),
+          protocolId: "@mock-member",
+          kind: "private",
+          displayName: "Mock Member"
+        }
+      : contact;
     const message: IncomingProtocolMessage = {
       id: localMessageId([conversation.id, sender.id, content, String(timestamp)]),
       conversation,

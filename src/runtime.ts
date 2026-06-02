@@ -18,6 +18,7 @@ import type {
   ContactKind,
   ConversationInput,
   ConversationRecord,
+  GroupMemberInput,
   IncomingProtocolMessage,
   MessageInput,
   MessageKind,
@@ -32,7 +33,7 @@ import type {
   WorkbenchRenderer
 } from "./types.js";
 import { normalizeComparableGroupName, normalizeComparableText } from "./util/group-name.js";
-import { conversationFromContact, localMessageId } from "./util/ids.js";
+import { conversationFromContact, groupMemberId, localMessageId } from "./util/ids.js";
 import { FileRegistry } from "./util/file-hash.js";
 import { MediaCache, extensionFromContentType } from "./util/media-cache.js";
 import { openWithSystem, revealInFileManager } from "./util/open.js";
@@ -767,17 +768,30 @@ export class WeChatRuntime extends EventEmitter {
   private handleIncomingMessage(incoming: IncomingProtocolMessage): void {
     const scopedIncoming = this.scopeIncomingMessage(incoming);
     let conversationContact = this.store.upsertContact(this.contactFromConversationInput(scopedIncoming.conversation));
-    let senderForMessage = scopedIncoming.sender;
+    let senderForMessage: { id: string; protocolId?: string; displayName: string } = scopedIncoming.sender;
+    let senderKind: MessageInput["senderKind"] = scopedIncoming.isSelf ? "self" : "contact";
+    let senderProtocolId = scopedIncoming.sender.protocolId;
     const senderIsGroupConversation =
       scopedIncoming.conversation.kind === "group" &&
       !!scopedIncoming.sender.protocolId &&
       scopedIncoming.sender.protocolId === scopedIncoming.conversation.protocolId;
-    if (
+    if (scopedIncoming.conversation.kind === "group" && !scopedIncoming.isSelf) {
+      senderKind = "group-member";
+      const groupMember = !senderIsGroupConversation
+        ? this.groupMemberFromSender(scopedIncoming.conversation, scopedIncoming.sender)
+        : undefined;
+      if (groupMember) {
+        const savedGroupMember = this.store.upsertGroupMember(groupMember);
+        senderForMessage = savedGroupMember;
+        senderProtocolId = savedGroupMember.memberProtocolId;
+      }
+    } else if (
       !senderIsGroupConversation &&
       (scopedIncoming.sender.id !== scopedIncoming.conversation.id || scopedIncoming.conversation.kind !== "group")
     ) {
       const senderContact = this.store.upsertContact(scopedIncoming.sender);
       senderForMessage = senderContact;
+      senderProtocolId = senderContact.protocolId;
       if (
         scopedIncoming.conversation.kind === "private" &&
         !!scopedIncoming.sender.protocolId &&
@@ -798,6 +812,8 @@ export class WeChatRuntime extends EventEmitter {
         protocolMessageId: scopedIncoming.protocolMessageId,
         conversationId: scopedIncoming.conversation.id,
         senderId: senderForMessage.id,
+        senderKind,
+        senderProtocolId,
         senderName: scopedIncoming.isSelf ? "You" : senderForMessage.displayName,
         isSelf: scopedIncoming.isSelf,
         content: scopedIncoming.content,
@@ -838,6 +854,23 @@ export class WeChatRuntime extends EventEmitter {
     if (!isPublic && isDownloadableType(scopedIncoming.type)) {
       void this.downloadAndCacheMedia(incoming, saved);
     }
+  }
+
+  private groupMemberFromSender(conversation: ConversationInput, sender: ContactInput): GroupMemberInput | undefined {
+    if (!sender.protocolId) {
+      return undefined;
+    }
+    return {
+      id: groupMemberId(conversation.id, sender.protocolId),
+      groupId: conversation.id,
+      groupProtocolId: conversation.protocolId,
+      memberProtocolId: sender.protocolId,
+      displayName: sender.displayName,
+      remarkName: sender.remarkName,
+      nickName: sender.nickName,
+      alias: sender.alias,
+      raw: sender.raw
+    };
   }
 
   private async downloadAndCacheMedia(incoming: IncomingProtocolMessage, saved: MessageRecord): Promise<void> {

@@ -269,6 +269,95 @@ describe("WeChatRuntime", () => {
     store.close();
   });
 
+  it("does not expose group message senders as searchable contacts", async () => {
+    const store = new SqliteStore(tempDb());
+    const protocol = new MockProtocol();
+    const renderer = new FakeRenderer();
+    const runtime = new WeChatRuntime(protocol, store, renderer, { initialHistoryLimit: 10 });
+    const group: ContactInput = {
+      id: contactId("group", ["project-a"]),
+      protocolId: "@@project-a",
+      kind: "group",
+      displayName: "Project A"
+    };
+    const sender: ContactInput = {
+      id: contactId("private", ["@mock-member"]),
+      protocolId: "@mock-member",
+      kind: "private",
+      displayName: "Mock Member"
+    };
+    const conversation = conversationFromContact(group);
+
+    await runtime.start();
+    protocol.emit("message", {
+      id: localMessageId([conversation.id, sender.id, "group hello"]),
+      conversation,
+      sender,
+      isSelf: false,
+      content: "group hello",
+      type: "text",
+      timestamp: 1_700_000_000_000
+    });
+
+    const storedConversation = renderer.latest.conversations.find((item) => item.title === "Project A");
+    const message = store.listMessages(storedConversation?.id ?? "")[0];
+    expect(message?.senderName).toBe("Mock Member");
+    expect(message?.senderKind).toBe("group-member");
+    expect(message?.senderProtocolId).toBe("@mock-member");
+    expect(store.searchContacts("Mock Member")).toHaveLength(0);
+    expect(store.searchContacts("Project A")).toHaveLength(1);
+    store.close();
+  });
+
+  it("backfills sparse group message sender names from later group member metadata", async () => {
+    const store = new SqliteStore(tempDb());
+    const protocol = new MockProtocol();
+    const renderer = new FakeRenderer();
+    const runtime = new WeChatRuntime(protocol, store, renderer, { initialHistoryLimit: 10 });
+    const group: ContactInput = {
+      id: contactId("group", ["late-project"]),
+      protocolId: "@@late-project",
+      kind: "group",
+      displayName: "Late Project"
+    };
+    const sparseSender: ContactInput = {
+      id: contactId("private", ["@late-member"]),
+      protocolId: "@late-member",
+      kind: "private",
+      displayName: "Group member"
+    };
+    const conversation = conversationFromContact(group);
+
+    await runtime.start();
+    protocol.emit("message", {
+      id: localMessageId([conversation.id, sparseSender.id, "late hello"]),
+      conversation,
+      sender: sparseSender,
+      isSelf: false,
+      content: "late hello",
+      type: "text",
+      timestamp: 1_700_000_000_000
+    });
+
+    const storedConversation = renderer.latest.conversations.find((item) => item.title === "Late Project");
+    expect(store.listMessages(storedConversation?.id ?? "")[0]?.senderName).toBe("Group member");
+
+    protocol.emit("contacts", [
+      {
+        ...group,
+        raw: {
+          UserName: "@@late-project",
+          MemberList: [{ UserName: "@late-member", DisplayName: "Late Member" }]
+        }
+      }
+    ]);
+
+    expect(store.listMessages(storedConversation?.id ?? "")[0]?.senderName).toBe("Late Member");
+    expect(store.findConversationById(storedConversation?.id ?? "")?.lastMessageSenderName).toBe("Late Member");
+    expect(store.searchContacts("Late Member")).toHaveLength(0);
+    store.close();
+  });
+
   it("uses redraw state for chats, keyboard navigation, chat input, unread status, and search", async () => {
     const store = new SqliteStore(tempDb());
     const protocol = new MockProtocol();
