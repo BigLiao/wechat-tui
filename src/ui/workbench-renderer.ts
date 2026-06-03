@@ -17,6 +17,7 @@ const BRACKETED_PASTE_START = "\x1b[200~";
 const BRACKETED_PASTE_END = "\x1b[201~";
 const DUPLICATE_NAVIGATION_KEY_SUPPRESSION_MS = 25;
 const DEDUPED_KEY_NAMES = new Set(["up", "down", "left", "right", "return", "enter", "escape"]);
+const DEFAULT_TERMINAL_TITLE = "WeChat";
 
 interface LastKeyInput {
   name: string;
@@ -30,6 +31,7 @@ export class WorkbenchTerminalRenderer implements WorkbenchRenderer {
   private closeHandler?: () => void;
   private fileRegistry?: FileRegistry;
   private lastKeyInput?: LastKeyInput;
+  private terminalTitle?: string;
 
   constructor(private readonly terminal: Terminal = new ProcessTerminal()) {}
 
@@ -96,6 +98,7 @@ export class WorkbenchTerminalRenderer implements WorkbenchRenderer {
     this.closeHandler = onClose;
     process.stdin.on("end", this.closeHandler);
     process.stdin.on("close", this.closeHandler);
+    this.updateTerminalTitle(DEFAULT_TERMINAL_TITLE);
     this.tui.start();
   }
 
@@ -111,14 +114,24 @@ export class WorkbenchTerminalRenderer implements WorkbenchRenderer {
     this.tui = undefined;
     this.app = undefined;
     this.lastKeyInput = undefined;
+    this.updateTerminalTitle(DEFAULT_TERMINAL_TITLE);
   }
 
   render(state: RenderState): void {
     if (!this.tui || !this.app) {
       return;
     }
+    this.updateTerminalTitle(terminalTitleForState(state));
     this.app.setState(state);
     this.tui.requestRender();
+  }
+
+  private updateTerminalTitle(title: string): void {
+    if (this.terminalTitle === title) {
+      return;
+    }
+    this.terminal.setTitle(title);
+    this.terminalTitle = title;
   }
 
   private shouldSuppressDuplicateKey(key: UiKey): boolean {
@@ -134,6 +147,10 @@ export class WorkbenchTerminalRenderer implements WorkbenchRenderer {
     this.lastKeyInput = { name, at: now };
     return shouldSuppress;
   }
+}
+
+function terminalTitleForState(state: RenderState): string {
+  return state.totalUnreadCount > 0 ? `${DEFAULT_TERMINAL_TITLE} (${state.totalUnreadCount})` : DEFAULT_TERMINAL_TITLE;
 }
 
 export function renderState(state: RenderState, options: { width?: number; rows?: number } = {}): string {

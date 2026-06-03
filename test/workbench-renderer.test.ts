@@ -95,6 +95,21 @@ describe("WorkbenchTerminalRenderer", () => {
     expect(events).toEqual([{ type: "conversation-select", index: 1 }]);
   });
 
+  it("updates the terminal tab title with unread counts", () => {
+    const terminal = new InputTerminal();
+    const renderer = new WorkbenchTerminalRenderer(terminal);
+
+    renderer.start(() => {}, () => {});
+    expect(terminal.titles).toEqual(["WeChat"]);
+
+    renderer.render(baseState({ totalUnreadCount: 2 }));
+    renderer.render(baseState({ totalUnreadCount: 2 }));
+    expect(terminal.titles).toEqual(["WeChat", "WeChat (2)"]);
+
+    renderer.stop();
+    expect(terminal.titles).toEqual(["WeChat", "WeChat (2)", "WeChat"]);
+  });
+
   it("forwards tab from the chat editor to runtime", () => {
     const terminal = new InputTerminal();
     const events: UiEvent[] = [];
@@ -787,6 +802,7 @@ class InputTerminal implements Terminal {
   readonly columns = 80;
   readonly rows = 24;
   readonly kittyProtocolActive = true;
+  readonly titles: string[] = [];
   private input?: (data: string) => void;
 
   start(onInput: (data: string) => void): void {
@@ -806,6 +822,8 @@ class InputTerminal implements Terminal {
   clearLine(): void {}
   clearFromCursor(): void {}
   clearScreen(): void {}
-  setTitle(): void {}
+  setTitle(title: string): void {
+    this.titles.push(title);
+  }
   setProgress(): void {}
 }
