@@ -1,6 +1,8 @@
+import { EventEmitter } from "node:events";
 import { describe, expect, it } from "vitest";
 import {
   hydrateSparseGroupSender,
+  installNonBlockingWechat4uMessageDispatch,
   isRecoverableWechat4uError,
   normalizeWechat4uMessage
 } from "../src/protocol/wechat4u-adapter.js";
@@ -553,6 +555,110 @@ describe("normalizeWechat4uMessage", () => {
   });
 });
 
+describe("installNonBlockingWechat4uMessageDispatch", () => {
+  it("emits group messages without waiting for missing contact lookup", () => {
+    const bot = Object.assign(new EventEmitter(), {
+      user: { UserName: "@me", NickName: "Me" },
+      contacts: {
+        "@me": { UserName: "@me", NickName: "Me" }
+      } as Record<string, { UserName: string; NickName?: string; MemberList?: unknown[] }>,
+      CONF: {
+        MSGTYPE_STATUSNOTIFY: 51
+      },
+      Message: {
+        extend: (message: Record<string, unknown>) => {
+          message.OriginalContent = message.Content;
+          message.isSendBySelf = message.FromUserName === "@me";
+          message.Content = String(message.Content ?? "").replace(/<br\/>/g, "\n");
+          return message;
+        }
+      },
+      handleMsg: (_messages: unknown[]) => {
+        throw new Error("original handleMsg should be replaced");
+      },
+      stop: () => {},
+      batchGetContact: async () => new Promise<unknown[]>(() => {}),
+      updateContacts: () => {
+        throw new Error("slow lookup should not resolve");
+      }
+    });
+    const received: unknown[] = [];
+    bot.on("message", (message) => {
+      received.push(message);
+    });
+
+    expect(installNonBlockingWechat4uMessageDispatch(bot)).toBe(true);
+    bot.handleMsg([
+      {
+        MsgId: "group-1",
+        FromUserName: "@@group",
+        ToUserName: "@me",
+        MsgType: 1,
+        Content: "@member:<br/>hello"
+      }
+    ]);
+
+    expect(received).toHaveLength(1);
+    expect(received[0]).toMatchObject({
+      FromUserName: "@@group",
+      Content: "@member:\nhello"
+    });
+    expect(bot.contacts["@@group"]?.MemberList).toEqual([]);
+  });
+
+  it("refreshes missing message contacts in the background", async () => {
+    let requestedContacts: unknown[] | undefined;
+    let updatedContacts: unknown[] | undefined;
+    const richGroup = {
+      UserName: "@@group",
+      NickName: "Project",
+      MemberCount: 1,
+      MemberList: [{ UserName: "@member", NickName: "Alice" }]
+    };
+    const bot = Object.assign(new EventEmitter(), {
+      user: { UserName: "@me", NickName: "Me" },
+      contacts: {
+        "@me": { UserName: "@me", NickName: "Me" }
+      } as Record<string, { UserName: string; NickName?: string; MemberList?: unknown[] }>,
+      CONF: {
+        MSGTYPE_STATUSNOTIFY: 51
+      },
+      Message: {
+        extend: (message: Record<string, unknown>) => {
+          message.OriginalContent = message.Content;
+          message.isSendBySelf = message.FromUserName === "@me";
+          return message;
+        }
+      },
+      handleMsg: (_messages: unknown[]) => {},
+      stop: () => {},
+      batchGetContact: async (contacts: unknown[]) => {
+        requestedContacts = contacts;
+        return [richGroup];
+      },
+      updateContacts: (contacts: unknown[]) => {
+        updatedContacts = contacts;
+      }
+    });
+
+    expect(installNonBlockingWechat4uMessageDispatch(bot)).toBe(true);
+    bot.handleMsg([
+      {
+        MsgId: "group-1",
+        FromUserName: "@@group",
+        ToUserName: "@me",
+        MsgType: 1,
+        Content: "@member:<br/>hello"
+      }
+    ]);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(requestedContacts).toEqual([{ UserName: "@@group" }]);
+    expect(updatedContacts).toEqual([richGroup]);
+  });
+});
+
 describe("isRecoverableWechat4uError", () => {
   it("treats batch contact timeouts as recoverable", () => {
     const error = Object.assign(new Error("timeout of 60000ms exceeded"), {
@@ -564,6 +670,46 @@ describe("isRecoverableWechat4uError", () => {
     });
 
     expect(isRecoverableWechat4uError(error)).toBe(true);
+  });
+
+  it("treats sync check timeouts as recoverable", () => {
+    const error = Object.assign(new Error("timeout of 60000ms exceeded"), {
+      code: "ECONNABORTED",
+      tips: "同步失败",
+      config: {
+        url: "https://webpush.wx2.qq.com/cgi-bin/mmwebwx-bin/synccheck"
+      }
+    });
+
+    expect(isRecoverableWechat4uError(error)).toBe(true);
+  });
+
+  it("treats webwxsync server errors as recoverable", () => {
+    const error = Object.assign(new Error("Request failed with status code 502"), {
+      tips: "获取新信息失败",
+      config: {
+        url: "https://wx2.qq.com/cgi-bin/mmwebwx-bin/webwxsync?sid=sensitive"
+      },
+      response: {
+        status: 502
+      }
+    });
+
+    expect(isRecoverableWechat4uError(error)).toBe(true);
+  });
+
+  it("does not treat non-network sync failures as recoverable", () => {
+    const error = Object.assign(new Error("session expired"), {
+      tips: "同步失败",
+      config: {
+        url: "https://webpush.wx2.qq.com/cgi-bin/mmwebwx-bin/synccheck"
+      },
+      response: {
+        status: 200
+      }
+    });
+
+    expect(isRecoverableWechat4uError(error)).toBe(false);
   });
 
   it("does not treat unrelated protocol errors as recoverable", () => {

@@ -39,6 +39,11 @@ type RawWechatBot = EventEmitter & {
   getVoice?: (msgId: string) => Promise<{ data: ArrayBuffer; type: string }>;
   getDoc?: (fromUserName: string, mediaId: string, fileName: string) => Promise<{ data: ArrayBuffer; type: string }>;
   batchGetContact?: (contacts: RawContact[]) => Promise<RawContact[]>;
+  updateContacts?: (contacts: RawContact[]) => void;
+  Message?: {
+    extend?: (message: RawMessage) => RawMessage;
+  };
+  handleMsg?: (messages: RawMessage[]) => void;
 };
 
 interface RawContact {
@@ -269,8 +274,13 @@ export class Wechat4uAdapter extends EventEmitter implements WeChatProtocol {
     // wechat4u defaults to sending a periodic "heartbeat" text to filehelper.
     // It is a protocol keepalive, not a user-visible chat message.
     bot.setPollingTargetGetter?.(() => "");
+    const nonBlockingMessageDispatch = installNonBlockingWechat4uMessageDispatch(bot, { logger: this.options.logger });
     this.options.logger?.debug(
-      { hasSessionData: sessionData !== undefined, disabledFilehelperHeartbeat: !!bot.setPollingTargetGetter },
+      {
+        hasSessionData: sessionData !== undefined,
+        disabledFilehelperHeartbeat: !!bot.setPollingTargetGetter,
+        nonBlockingMessageDispatch
+      },
       "wechat4u bot created"
     );
     return bot;
@@ -392,6 +402,141 @@ export class Wechat4uAdapter extends EventEmitter implements WeChatProtocol {
       this.emit("error", error instanceof Error ? error : new Error(String(error)));
     }
   }
+}
+
+interface NonBlockingWechat4uMessageDispatchOptions {
+  logger?: Logger;
+}
+
+export function installNonBlockingWechat4uMessageDispatch(
+  botInput: unknown,
+  options: NonBlockingWechat4uMessageDispatchOptions = {}
+): boolean {
+  const bot = botInput as RawWechatBot;
+  if (typeof bot.handleMsg !== "function" || typeof bot.Message?.extend !== "function") {
+    return false;
+  }
+
+  const extendMessage = bot.Message.extend.bind(bot.Message);
+  const inFlightContactRefreshes = new Set<string>();
+  bot.handleMsg = (messages: RawMessage[]) => {
+    const messageList = Array.isArray(messages) ? messages : [];
+    for (const raw of messageList) {
+      try {
+        scheduleWechat4uMessageContactRefresh(raw, bot, inFlightContactRefreshes, options);
+        ensureWechat4uMessageContactPlaceholder(raw, bot);
+        const message = extendMessage(raw);
+        bot.emit("message", message);
+        scheduleWechat4uStatusNotifyContactRefresh(message, bot, options);
+        if (isWechat4uStopControlMessage(message)) {
+          bot.stop();
+        }
+      } catch (error) {
+        options.logger?.debug({ err: error }, "wechat4u non-blocking message dispatch failed");
+        bot.emit("error", error);
+      }
+    }
+  };
+  return true;
+}
+
+function scheduleWechat4uMessageContactRefresh(
+  raw: RawMessage,
+  bot: RawWechatBot,
+  inFlightContactRefreshes: Set<string>,
+  options: NonBlockingWechat4uMessageDispatchOptions
+): void {
+  const fromUserName = raw.FromUserName;
+  if (!fromUserName || !bot.batchGetContact || !bot.updateContacts || !shouldRefreshWechat4uMessageContact(raw, bot)) {
+    return;
+  }
+  if (inFlightContactRefreshes.has(fromUserName)) {
+    return;
+  }
+
+  inFlightContactRefreshes.add(fromUserName);
+  void bot.batchGetContact([{ UserName: fromUserName }]).then((contacts) => {
+    bot.updateContacts?.(contacts);
+  }).catch((error) => {
+    options.logger?.debug({ err: error, fromUserName }, "background message contact refresh failed");
+  }).finally(() => {
+    inFlightContactRefreshes.delete(fromUserName);
+  });
+}
+
+function shouldRefreshWechat4uMessageContact(raw: RawMessage, bot: RawWechatBot): boolean {
+  const fromUserName = raw.FromUserName;
+  if (!fromUserName) {
+    return false;
+  }
+  const contact = bot.contacts?.[fromUserName];
+  if (!contact) {
+    return true;
+  }
+  return fromUserName.startsWith("@@") && Number(contact.MemberCount ?? 0) === 0;
+}
+
+function ensureWechat4uMessageContactPlaceholder(raw: RawMessage, bot: RawWechatBot): void {
+  const fromUserName = raw.FromUserName;
+  if (!fromUserName?.startsWith("@@")) {
+    return;
+  }
+
+  bot.contacts ??= {};
+  const contact = bot.contacts[fromUserName] ?? {
+    UserName: fromUserName,
+    NickName: fromUserName,
+    DisplayName: fromUserName,
+    MemberCount: 0,
+    MemberList: []
+  };
+  if (!Array.isArray(contact.MemberList)) {
+    contact.MemberList = [];
+  }
+  if (contact.MemberCount === undefined) {
+    contact.MemberCount = contact.MemberList.length;
+  }
+  bot.contacts[fromUserName] = contact;
+}
+
+function scheduleWechat4uStatusNotifyContactRefresh(
+  raw: RawMessage,
+  bot: RawWechatBot,
+  options: NonBlockingWechat4uMessageDispatchOptions
+): void {
+  if (!raw.StatusNotifyUserName || !bot.batchGetContact || !bot.updateContacts) {
+    return;
+  }
+
+  const conf = bot.CONF as { MSGTYPE_STATUSNOTIFY?: number } | undefined;
+  if (Number(raw.MsgType) !== Number(conf?.MSGTYPE_STATUSNOTIFY ?? 51)) {
+    return;
+  }
+
+  const userList = raw.StatusNotifyUserName.split(",")
+    .map((UserName) => UserName.trim())
+    .filter((UserName) => UserName && !bot.contacts?.[UserName])
+    .map((UserName) => ({ UserName }));
+  for (const list of chunkArray(userList, 50)) {
+    void bot.batchGetContact(list).then((contacts) => {
+      bot.updateContacts?.(contacts);
+    }).catch((error) => {
+      options.logger?.debug({ err: error, contactCount: list.length }, "background status notify contact refresh failed");
+    });
+  }
+}
+
+function chunkArray<T>(items: T[], size: number): T[][] {
+  const chunks: T[][] = [];
+  for (let index = 0; index < items.length; index += size) {
+    chunks.push(items.slice(index, index + size));
+  }
+  return chunks;
+}
+
+function isWechat4uStopControlMessage(raw: RawMessage): boolean {
+  const content = raw.Content ?? "";
+  return (raw.ToUserName === "filehelper" && content === "退出wechat4u") || /^(.\udf1a\u0020\ud83c.){3}$/.test(content);
 }
 
 function normalizeUser(raw?: RawContact): UserProfile {
@@ -1253,12 +1398,16 @@ export function isRecoverableWechat4uError(error: unknown): boolean {
 
   const isBatchContactFailure =
     tips.includes("批量获取联系人失败") || (url !== undefined && url.includes("/webwxbatchgetcontact"));
+  const isSyncFailure =
+    tips.includes("同步失败") ||
+    tips.includes("获取新信息失败") ||
+    (url !== undefined && (url.includes("/synccheck") || url.includes("/webwxsync")));
   const isTransientNetworkFailure =
-    ["ETIMEDOUT", "ECONNABORTED", "ECONNRESET", "EAI_AGAIN", "ENETUNREACH"].includes(code) ||
+    ["ETIMEDOUT", "ECONNABORTED", "ECONNRESET", "ECONNREFUSED", "EAI_AGAIN", "ENETUNREACH", "EHOSTUNREACH"].includes(code) ||
     /timeout|timed out|socket hang up|network/i.test(message) ||
     (responseStatus !== undefined && responseStatus >= 500);
 
-  return isBatchContactFailure && isTransientNetworkFailure;
+  return (isBatchContactFailure || isSyncFailure) && isTransientNetworkFailure;
 }
 
 function summarizeWechat4uError(error: Error): Record<string, unknown> {
