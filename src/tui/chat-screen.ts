@@ -1,6 +1,6 @@
 import { theme, fit, fillLines } from "./theme.js";
 import { Header } from "./components/header.js";
-import { StatusBar, HINTS_CHAT } from "./components/status-bar.js";
+import { StatusBar, HINTS_CHAT, HINTS_CHAT_SWITCHER } from "./components/status-bar.js";
 import { MessageList } from "./components/message-list.js";
 import { ChatEditor } from "./components/chat-editor.js";
 import type { RenderState } from "../types.js";
@@ -25,13 +25,14 @@ export class ChatScreen {
 
     // Unread from other conversations
     const otherUnread = unreadSummary(state);
-    const otherUnreadLines = otherUnread ? ["", fit(`  ${theme.dim(otherUnread)}`, width)] : [];
+    const otherUnreadLines = otherUnread ? ["", fit(`  ${otherUnread}`, width)] : [];
 
     // Fixed bottom: status bar + editor
     const editorLines = this.editor.render(width);
+    const hints = state.conversationSwitcherActive ? HINTS_CHAT_SWITCHER : HINTS_CHAT;
     const unreadText = state.totalUnreadCount > 0 ? `${state.totalUnreadCount} unread` : "";
     const bottomLines: string[] = [];
-    bottomLines.push(this.statusBar.render(state, HINTS_CHAT, width, unreadText));
+    bottomLines.push(this.statusBar.render(state, hints, width, unreadText));
     bottomLines.push(...editorLines);
 
     // Content: messages, sized to the remaining viewport above the fixed bottom.
@@ -51,9 +52,13 @@ export class ChatScreen {
 }
 
 function unreadSummary(state: RenderState): string {
-  const items = state.unreadConversations
-    .filter((c) => c.id !== state.activeConversation?.id && c.unreadCount > 0)
-    .slice(0, 3)
-    .map((c) => `${c.title}(${c.unreadCount})`);
-  return items.length > 0 ? items.join(" · ") : "";
+  const conversations = state.switcherConversations.filter((c) => c.id !== state.activeConversation?.id);
+  const selectedConversationId = state.conversationSwitcherActive ? state.selectedSwitcherConversationId : undefined;
+  const items = conversations
+    .slice(0, state.conversationSwitcherActive ? conversations.length : 3)
+    .map((c) => {
+      const label = c.unreadCount > 0 ? `${c.title}(${c.unreadCount})` : c.title;
+      return c.id === selectedConversationId ? theme.unreadActive(` ${label} `) : theme.dim(label);
+    });
+  return items.length > 0 ? items.join(theme.dim(" · ")) : "";
 }

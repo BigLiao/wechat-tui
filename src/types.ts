@@ -228,6 +228,9 @@ export interface RenderState {
   commandInput: string;
   totalUnreadCount: number;
   unreadConversations: ConversationRecord[];
+  switcherConversations: ConversationRecord[];
+  conversationSwitcherActive: boolean;
+  selectedSwitcherConversationId?: string;
 }
 
 export interface WorkbenchRenderer {

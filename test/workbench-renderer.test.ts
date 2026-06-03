@@ -17,6 +17,7 @@ function stripAnsi(input: string): string {
 }
 
 function baseState(overrides: Partial<RenderState>): RenderState {
+  const unreadConversations = overrides.unreadConversations ?? [];
   return {
     view: "chats",
     connectionState: "online",
@@ -32,7 +33,9 @@ function baseState(overrides: Partial<RenderState>): RenderState {
     messageScrollOffset: 0,
     commandInput: "",
     totalUnreadCount: 0,
-    unreadConversations: [],
+    unreadConversations,
+    switcherConversations: overrides.switcherConversations ?? unreadConversations,
+    conversationSwitcherActive: false,
     ...overrides
   };
 }
@@ -90,6 +93,148 @@ describe("WorkbenchTerminalRenderer", () => {
     renderer.stop();
 
     expect(events).toEqual([{ type: "conversation-select", index: 1 }]);
+  });
+
+  it("forwards tab from the chat editor to runtime", () => {
+    const terminal = new InputTerminal();
+    const events: UiEvent[] = [];
+    const renderer = new WorkbenchTerminalRenderer(terminal);
+
+    renderer.start((event) => events.push(event), () => {});
+    renderer.render(
+      baseState({
+        view: "chat",
+        activeConversation: {
+          id: "conversation:boss",
+          protocolId: "@boss",
+          kind: "private",
+          title: "Boss",
+          unreadCount: 0,
+          updatedAt: 1_700_000_000_000
+        },
+        switcherConversations: [
+          {
+            id: "conversation:project",
+            protocolId: "@@project",
+            kind: "group",
+            title: "Project A",
+            unreadCount: 2,
+            updatedAt: 1_700_000_100_000
+          }
+        ],
+        totalUnreadCount: 2
+      })
+    );
+
+    terminal.send("\t");
+    renderer.stop();
+
+    expect(events).toEqual([{ type: "key", key: { sequence: "\t", name: "tab" } }]);
+  });
+
+  it("consumes tab before autocomplete when the chat input is empty and there are no unread conversations", () => {
+    const terminal = new InputTerminal();
+    const events: UiEvent[] = [];
+    const renderer = new WorkbenchTerminalRenderer(terminal);
+
+    renderer.start((event) => events.push(event), () => {});
+    renderer.render(
+      baseState({
+        view: "chat",
+        activeConversation: {
+          id: "conversation:boss",
+          protocolId: "@boss",
+          kind: "private",
+          title: "Boss",
+          unreadCount: 0,
+          updatedAt: 1_700_000_000_000
+        }
+      })
+    );
+
+    terminal.send("\t");
+    renderer.stop();
+
+    expect(events).toEqual([]);
+  });
+
+  it("forwards tab when the only switcher target is the remembered previous chat", () => {
+    const terminal = new InputTerminal();
+    const events: UiEvent[] = [];
+    const renderer = new WorkbenchTerminalRenderer(terminal);
+
+    renderer.start((event) => events.push(event), () => {});
+    renderer.render(
+      baseState({
+        view: "chat",
+        activeConversation: {
+          id: "conversation:project",
+          protocolId: "@@project",
+          kind: "group",
+          title: "Project A",
+          unreadCount: 0,
+          updatedAt: 1_700_000_100_000
+        },
+        switcherConversations: [
+          {
+            id: "conversation:boss",
+            protocolId: "@boss",
+            kind: "private",
+            title: "Boss",
+            unreadCount: 0,
+            updatedAt: 1_700_000_000_000
+          }
+        ]
+      })
+    );
+
+    terminal.send("\t");
+    renderer.stop();
+
+    expect(events).toEqual([{ type: "key", key: { sequence: "\t", name: "tab" } }]);
+  });
+
+  it("forwards conversation switcher controls instead of focusing the chat editor", () => {
+    const terminal = new InputTerminal();
+    const events: UiEvent[] = [];
+    const renderer = new WorkbenchTerminalRenderer(terminal);
+
+    renderer.start((event) => events.push(event), () => {});
+    renderer.render(
+      baseState({
+        view: "chat",
+        activeConversation: {
+          id: "conversation:boss",
+          protocolId: "@boss",
+          kind: "private",
+          title: "Boss",
+          unreadCount: 0,
+          updatedAt: 1_700_000_000_000
+        },
+        unreadConversations: [
+          {
+            id: "conversation:project",
+            protocolId: "@@project",
+            kind: "group",
+            title: "Project A",
+            unreadCount: 2,
+            updatedAt: 1_700_000_100_000
+          }
+        ],
+        totalUnreadCount: 2,
+        conversationSwitcherActive: true,
+        selectedSwitcherConversationId: "conversation:project"
+      })
+    );
+
+    terminal.send("\x1b[C");
+    terminal.send("\r");
+    renderer.stop();
+
+    expect(events).toEqual([
+      { type: "key", key: { sequence: "\x1b[C", name: "right" } },
+      { type: "key", key: { sequence: "\r", name: "return" } }
+    ]);
   });
 
   it("renders recent conversations with unread and group sender preview", () => {
@@ -335,6 +480,119 @@ describe("WorkbenchTerminalRenderer", () => {
     expect(output).toContain("Project A(2)");
     expect(output).not.toContain("Boss > ok");
     expect(output).not.toContain("hidden from body");
+  });
+
+  it("renders conversation switcher hints, background highlight, and keeps the chat input visible", () => {
+    chalk.level = 1;
+    const output = renderState(
+      baseState({
+        view: "chat",
+        activeConversation: {
+          id: "conversation:boss",
+          protocolId: "@boss",
+          kind: "private",
+          title: "Boss",
+          unreadCount: 0,
+          updatedAt: 1_700_000_000_000
+        },
+        messages: [
+          {
+            id: "message:1",
+            conversationId: "conversation:boss",
+            senderName: "Boss",
+            isSelf: false,
+            content: "meet at three",
+            type: "text",
+            timestamp: 1_700_000_000_000,
+            createdAt: 1_700_000_000_000
+          }
+        ],
+        switcherConversations: [
+          {
+            id: "conversation:project",
+            protocolId: "@@project",
+            kind: "group",
+            title: "Project A",
+            unreadCount: 2,
+            updatedAt: 1_700_000_100_000
+          },
+          {
+            id: "conversation:ops",
+            protocolId: "@ops",
+            kind: "private",
+            title: "Ops",
+            unreadCount: 1,
+            updatedAt: 1_700_000_090_000
+          },
+          {
+            id: "conversation:archive",
+            protocolId: "@archive",
+            kind: "private",
+            title: "Archive",
+            unreadCount: 0,
+            updatedAt: 1_700_000_080_000
+          }
+        ],
+        totalUnreadCount: 3,
+        chatInput: "draft text",
+        conversationSwitcherActive: true,
+        selectedSwitcherConversationId: "conversation:project"
+      })
+    );
+
+    const plain = stripAnsi(output);
+    expect(output).toContain(theme.unreadActive(" Project A(2) "));
+    expect(plain).toContain("Ops(1)");
+    expect(plain).toContain("Archive");
+    expect(plain).not.toContain("Archive(0)");
+    expect(plain).toContain("⏎ confirm");
+    expect(plain).toContain("Esc cancel");
+    expect(plain).not.toContain("←→ switch");
+    expect(plain).not.toContain("⏎ send");
+    expect(plain).toContain("draft text");
+  });
+
+  it("renders remembered return targets in the switcher status line before tab is pressed again", () => {
+    const output = renderState(
+      baseState({
+        view: "chat",
+        activeConversation: {
+          id: "conversation:project",
+          protocolId: "@@project",
+          kind: "group",
+          title: "Project A",
+          unreadCount: 0,
+          updatedAt: 1_700_000_100_000
+        },
+        messages: [
+          {
+            id: "message:1",
+            conversationId: "conversation:project",
+            senderName: "Mock Member",
+            isSelf: false,
+            content: "field changed",
+            type: "text",
+            timestamp: 1_700_000_100_000,
+            createdAt: 1_700_000_100_000
+          }
+        ],
+        switcherConversations: [
+          {
+            id: "conversation:boss",
+            protocolId: "@boss",
+            kind: "private",
+            title: "Boss",
+            unreadCount: 0,
+            updatedAt: 1_700_000_000_000
+          }
+        ]
+      })
+    );
+
+    const plain = stripAnsi(output);
+    expect(plain).toContain("Boss");
+    expect(plain).not.toContain("Boss(0)");
+    expect(plain).not.toContain("⏎ confirm");
   });
 
   it("renders attachment placeholders", () => {

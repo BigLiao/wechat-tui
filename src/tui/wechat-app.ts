@@ -44,7 +44,9 @@ function emptyState(): RenderState {
     messageScrollOffset: 0,
     commandInput: "",
     totalUnreadCount: 0,
-    unreadConversations: []
+    unreadConversations: [],
+    switcherConversations: [],
+    conversationSwitcherActive: false
   };
 }
 
@@ -100,7 +102,7 @@ export class WechatApp implements Component {
       this.commandPanelVisible = false;
       this.confirmPanelVisible = false;
       this.chatEditor.syncText(state.chatInput);
-      this.tui.setFocus(this.chatEditor.focusTarget);
+      this.tui.setFocus(state.conversationSwitcherActive ? null : this.chatEditor.focusTarget);
     } else if (state.view === "chats") {
       this.syncConversationList(state);
       if (!this.commandPanelVisible && !this.confirmPanelVisible) {
@@ -186,7 +188,26 @@ export class WechatApp implements Component {
   }
 
   isChatAutocompleteActive(): boolean {
-    return this.state.view === "chat" && this.state.chatInput.startsWith("/");
+    return this.state.view === "chat" && !this.state.conversationSwitcherActive && this.state.chatInput.startsWith("/");
+  }
+
+  isConversationSwitcherActive(): boolean {
+    return this.state.view === "chat" && this.state.conversationSwitcherActive;
+  }
+
+  hasConversationSwitcherTargets(): boolean {
+    return (
+      this.state.view === "chat" &&
+      this.state.switcherConversations.some((conversation) => conversation.id !== this.state.activeConversation?.id)
+    );
+  }
+
+  isChatInputActive(): boolean {
+    return this.state.view === "chat" && !this.state.conversationSwitcherActive;
+  }
+
+  isChatInputEmpty(): boolean {
+    return this.state.view === "chat" && this.state.chatInput.length === 0;
   }
 
   isCommandPanelVisible(): boolean {

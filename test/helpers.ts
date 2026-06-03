@@ -58,5 +58,14 @@ export const key = {
   },
   down(): UiKey {
     return { sequence: "\u001b[B", name: "down" };
+  },
+  left(): UiKey {
+    return { sequence: "\u001b[D", name: "left" };
+  },
+  right(): UiKey {
+    return { sequence: "\u001b[C", name: "right" };
+  },
+  tab(): UiKey {
+    return { sequence: "\t", name: "tab" };
   }
 };

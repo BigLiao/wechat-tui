@@ -62,6 +62,8 @@ export class WeChatRuntime extends EventEmitter {
   private chatInput = "";
   private conversationQuery = "";
   private conversationFocus: "list" | "input" = "list";
+  private selectedSwitcherConversationId?: string;
+  private tabReturnConversationId?: string;
   private statusMessage?: string;
   private errorMessage?: string;
   private updateInfo?: UpdateInfo;
@@ -291,6 +293,8 @@ export class WeChatRuntime extends EventEmitter {
       this.chatInput = "";
       this.messageScrollOffset = 0;
       this.conversationFocus = "list";
+      this.selectedSwitcherConversationId = undefined;
+      this.tabReturnConversationId = undefined;
       this.fileRegistry.clear();
       this.contactSnapshotApplied = false;
     }
@@ -385,12 +389,22 @@ export class WeChatRuntime extends EventEmitter {
   }
 
   private async handleChatKey(key: UiKey): Promise<void> {
+    if (this.selectedSwitcherConversationId) {
+      this.handleConversationSwitcherKey(key);
+      return;
+    }
+    if (isTabKey(key)) {
+      this.cycleConversationSwitcher();
+      return;
+    }
     if (isEscapeKey(key)) {
       this.view = "chats";
       this.previousView = "chat";
       this.chatInput = "";
       this.messageScrollOffset = 0;
       this.conversationFocus = "list";
+      this.selectedSwitcherConversationId = undefined;
+      this.tabReturnConversationId = undefined;
       this.statusMessage = "back to recent chats";
       return;
     }
@@ -567,6 +581,8 @@ export class WeChatRuntime extends EventEmitter {
     this.searchKeyword = "";
     this.chatInput = "";
     this.messageScrollOffset = 0;
+    this.selectedSwitcherConversationId = undefined;
+    this.tabReturnConversationId = undefined;
     this.store.markRead(currentConversation.id);
     this.statusMessage = `opened ${currentConversation.title}`;
     this.options.logger?.info(
@@ -624,6 +640,87 @@ export class WeChatRuntime extends EventEmitter {
 
   private scrollChatMessages(delta: number): void {
     this.messageScrollOffset = Math.max(0, this.messageScrollOffset + delta);
+  }
+
+  private handleConversationSwitcherKey(key: UiKey): void {
+    if (isTabKey(key)) {
+      this.cycleConversationSwitcher();
+      return;
+    }
+    if (isEscapeKey(key)) {
+      this.exitConversationSwitcher("back to chat");
+      return;
+    }
+    if (isLeftKey(key)) {
+      this.moveConversationSwitcher(-1);
+      return;
+    }
+    if (isRightKey(key)) {
+      this.moveConversationSwitcher(1);
+      return;
+    }
+    if (isEnterKey(key)) {
+      this.openSelectedSwitcherConversation();
+    }
+  }
+
+  private cycleConversationSwitcher(): void {
+    const switcherConversations = this.listConversationSwitcherTargets();
+    if (switcherConversations.length === 0) {
+      this.exitConversationSwitcher();
+      return;
+    }
+    if (!this.selectedSwitcherConversationId) {
+      this.selectSwitcherConversation(switcherConversations[0]);
+      return;
+    }
+
+    const currentIndex = switcherConversations.findIndex((conversation) => conversation.id === this.selectedSwitcherConversationId);
+    const nextIndex = currentIndex < 0 ? 0 : currentIndex + 1;
+    if (nextIndex >= switcherConversations.length) {
+      this.exitConversationSwitcher("back to chat");
+      return;
+    }
+    this.selectSwitcherConversation(switcherConversations[nextIndex]);
+  }
+
+  private moveConversationSwitcher(delta: number): void {
+    const switcherConversations = this.listConversationSwitcherTargets();
+    if (switcherConversations.length === 0) {
+      this.exitConversationSwitcher("no conversations to switch");
+      return;
+    }
+
+    const currentIndex = Math.max(
+      0,
+      switcherConversations.findIndex((conversation) => conversation.id === this.selectedSwitcherConversationId)
+    );
+    const nextIndex = (currentIndex + delta + switcherConversations.length) % switcherConversations.length;
+    this.selectSwitcherConversation(switcherConversations[nextIndex]);
+  }
+
+  private openSelectedSwitcherConversation(): void {
+    const switcherConversations = this.listConversationSwitcherTargets();
+    const conversation = switcherConversations.find((item) => item.id === this.selectedSwitcherConversationId);
+    if (!conversation) {
+      this.exitConversationSwitcher("no conversations to switch");
+      return;
+    }
+    const returnConversationId = this.activeConversationId && this.activeConversationId !== conversation.id
+      ? this.activeConversationId
+      : undefined;
+    this.openConversation(conversation);
+    this.tabReturnConversationId = returnConversationId;
+  }
+
+  private selectSwitcherConversation(conversation: ConversationRecord): void {
+    this.selectedSwitcherConversationId = conversation.id;
+    this.statusMessage = `switch: ${conversation.title}`;
+  }
+
+  private exitConversationSwitcher(statusMessage?: string): void {
+    this.selectedSwitcherConversationId = undefined;
+    this.statusMessage = statusMessage;
   }
 
   private listVisibleConversations(): ConversationRecord[] {
@@ -931,7 +1028,9 @@ export class WeChatRuntime extends EventEmitter {
       : [];
     const searchResults = this.view === "search" ? this.store.searchContacts(this.searchKeyword, this.options.searchLimit ?? 20) : [];
     this.selectedSearchIndex = clampSelection(this.selectedSearchIndex, searchResults.length);
-    const unreadConversations = foldPublicConversations(this.store.listUnreadConversations(20)).slice(0, 6);
+    const unreadConversations = this.listUnreadConversations();
+    const switcherConversations = this.listConversationSwitcherTargets(unreadConversations);
+    this.syncConversationSwitcherSelection(switcherConversations);
     const totalUnreadCount = this.store.totalUnreadCount();
 
     this.options.logger?.trace(
@@ -988,8 +1087,44 @@ export class WeChatRuntime extends EventEmitter {
       messageScrollOffset: this.messageScrollOffset,
       commandInput: this.conversationQuery.startsWith("/") ? this.conversationQuery : "",
       totalUnreadCount,
-      unreadConversations
+      unreadConversations,
+      switcherConversations,
+      conversationSwitcherActive: !!this.selectedSwitcherConversationId,
+      selectedSwitcherConversationId: this.selectedSwitcherConversationId
     };
+  }
+
+  private listUnreadConversations(): ConversationRecord[] {
+    const unreadConversations = foldPublicConversations(this.store.listUnreadConversations(20));
+    return unreadConversations.filter(
+      (conversation) => conversation.unreadCount > 0 && conversation.id !== this.activeConversationId
+    );
+  }
+
+  private listConversationSwitcherTargets(unreadConversations = this.listUnreadConversations()): ConversationRecord[] {
+    const targets = [...unreadConversations];
+    const returnConversation = this.tabReturnConversationId ? this.store.findConversationById(this.tabReturnConversationId) : undefined;
+    if (
+      returnConversation &&
+      returnConversation.id !== this.activeConversationId &&
+      !targets.some((conversation) => conversation.id === returnConversation.id)
+    ) {
+      targets.unshift(returnConversation);
+    }
+    return targets;
+  }
+
+  private syncConversationSwitcherSelection(switcherConversations: ConversationRecord[]): void {
+    if (!this.selectedSwitcherConversationId) {
+      return;
+    }
+    if (switcherConversations.length === 0) {
+      this.selectedSwitcherConversationId = undefined;
+      return;
+    }
+    if (!switcherConversations.some((conversation) => conversation.id === this.selectedSwitcherConversationId)) {
+      this.selectedSwitcherConversationId = switcherConversations[0]?.id;
+    }
   }
 
   private getActiveConversation(): ConversationRecord | undefined {
@@ -1246,6 +1381,18 @@ function isDownKey(key: UiKey): boolean {
   return key.name === "down";
 }
 
+function isLeftKey(key: UiKey): boolean {
+  return key.name === "left";
+}
+
+function isRightKey(key: UiKey): boolean {
+  return key.name === "right";
+}
+
+function isTabKey(key: UiKey): boolean {
+  return key.name === "tab" || key.sequence === "\t";
+}
+
 function isEnterKey(key: UiKey): boolean {
   return key.name === "return" || key.name === "enter" || key.sequence === "\r" || key.sequence === "\n";
 }
@@ -1259,10 +1406,18 @@ function isBackspaceKey(key: UiKey): boolean {
 }
 
 function printableText(key: UiKey): string {
-  if (key.ctrl || key.meta || key.name === "up" || key.name === "down" || key.name === "left" || key.name === "right") {
+  if (
+    key.ctrl ||
+    key.meta ||
+    key.name === "up" ||
+    key.name === "down" ||
+    key.name === "left" ||
+    key.name === "right" ||
+    key.name === "tab"
+  ) {
     return "";
   }
-  if (isEnterKey(key) || isEscapeKey(key) || isBackspaceKey(key)) {
+  if (isEnterKey(key) || isEscapeKey(key) || isBackspaceKey(key) || isTabKey(key)) {
     return "";
   }
   return key.sequence;

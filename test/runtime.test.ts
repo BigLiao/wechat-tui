@@ -444,6 +444,95 @@ describe("WeChatRuntime", () => {
     store.close();
   });
 
+  it("switches unread conversations from the active chat with tab", async () => {
+    const store = new SqliteStore(tempDb());
+    const protocol = new MockProtocol();
+    const renderer = new FakeRenderer();
+    const runtime = new WeChatRuntime(protocol, store, renderer, { initialHistoryLimit: 10 });
+
+    await runtime.start();
+    protocol.emitIncoming("Boss", "first", 1_700_000_000_000);
+    await runtime.handleKey(key.enter());
+    await pressText(runtime, "draft");
+
+    protocol.emitIncoming("Project A", "field changed", 1_700_000_100_000);
+    const projectB: ContactInput = {
+      id: contactId("private", ["project-b"]),
+      protocolId: "@project-b",
+      kind: "private",
+      displayName: "Project B"
+    };
+    protocol.emit("contacts", [projectB]);
+    protocol.emit("message", {
+      id: localMessageId([projectB.id, "ship it", "1_700_000_200_000"]),
+      conversation: conversationFromContact(projectB),
+      sender: projectB,
+      isSelf: false,
+      content: "ship it",
+      type: "text",
+      timestamp: 1_700_000_200_000
+    });
+    expect(renderer.latest.activeConversation?.title).toBe("Boss");
+    expect(store.totalUnreadCount()).toBe(2);
+
+    await runtime.handleKey(key.tab());
+    expect(renderer.latest.conversationSwitcherActive).toBe(true);
+    expect(renderer.latest.chatInput).toBe("draft");
+    expect(renderer.latest.activeConversation?.title).toBe("Boss");
+    expect(store.totalUnreadCount()).toBe(2);
+    const firstSelection = renderer.latest.selectedSwitcherConversationId;
+    expect(firstSelection).toBeTruthy();
+
+    await runtime.handleKey(key.tab());
+    expect(renderer.latest.conversationSwitcherActive).toBe(true);
+    const secondSelection = renderer.latest.selectedSwitcherConversationId;
+    expect(secondSelection).toBeTruthy();
+    expect(secondSelection).not.toBe(firstSelection);
+
+    await runtime.handleKey(key.tab());
+    expect(renderer.latest.conversationSwitcherActive).toBe(false);
+    expect(renderer.latest.selectedSwitcherConversationId).toBeUndefined();
+    expect(renderer.latest.chatInput).toBe("draft");
+
+    await runtime.handleKey(key.tab());
+    await runtime.handleKey(key.right());
+    expect(renderer.latest.selectedSwitcherConversationId).toBe(secondSelection);
+    await runtime.handleKey(key.left());
+    expect(renderer.latest.selectedSwitcherConversationId).toBe(firstSelection);
+
+    await runtime.handleKey(key.escape());
+    expect(renderer.latest.conversationSwitcherActive).toBe(false);
+    expect(renderer.latest.activeConversation?.title).toBe("Boss");
+    expect(renderer.latest.chatInput).toBe("draft");
+
+    await runtime.handleKey(key.tab());
+    const selectedSwitcherTitle = renderer.latest.switcherConversations.find(
+      (conversation) => conversation.id === renderer.latest.selectedSwitcherConversationId
+    )?.title;
+    await runtime.handleKey(key.enter());
+    expect(renderer.latest.view).toBe("chat");
+    expect(renderer.latest.conversationSwitcherActive).toBe(false);
+    expect(renderer.latest.activeConversation?.title).toBe(selectedSwitcherTitle);
+    expect(renderer.latest.chatInput).toBe("");
+    expect(store.totalUnreadCount()).toBe(1);
+    const visibleReturnTarget = renderer.latest.switcherConversations.find((conversation) => conversation.title === "Boss");
+    expect(visibleReturnTarget?.unreadCount).toBe(0);
+    expect(renderer.latest.conversationSwitcherActive).toBe(false);
+
+    await runtime.handleKey(key.tab());
+    expect(renderer.latest.conversationSwitcherActive).toBe(true);
+    const returnTarget = renderer.latest.switcherConversations.find(
+      (conversation) => conversation.id === renderer.latest.selectedSwitcherConversationId
+    );
+    expect(returnTarget?.title).toBe("Boss");
+    expect(returnTarget?.unreadCount).toBe(0);
+    await runtime.handleKey(key.enter());
+    expect(renderer.latest.conversationSwitcherActive).toBe(false);
+    expect(renderer.latest.activeConversation?.title).toBe("Boss");
+    expect(store.totalUnreadCount()).toBe(1);
+    store.close();
+  });
+
   it("sends quoted image paths with spaces", async () => {
     const imageDir = mkdtempSync(join(tmpdir(), "wechat-tui-send-image-"));
     tempDirs.push(imageDir);

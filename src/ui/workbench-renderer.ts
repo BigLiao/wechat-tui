@@ -47,7 +47,7 @@ export class WorkbenchTerminalRenderer implements WorkbenchRenderer {
     this.tui.addChild(this.app);
     this.removeInputListener = this.tui.addInputListener((data) => {
       // Intercept bracketed paste containing image file paths in chat view
-      if (this.app?.isChatView() && data.includes(BRACKETED_PASTE_START)) {
+      if (this.app?.isChatInputActive() && data.includes(BRACKETED_PASTE_START)) {
         const transformed = this.app.transformPasteInput(data);
         if (transformed !== undefined) {
           return { data: transformed };
@@ -71,6 +71,16 @@ export class WorkbenchTerminalRenderer implements WorkbenchRenderer {
       // When command panel is visible, let SelectList handle all input
       if (this.app?.isChatsView() && this.app.isCommandPanelVisible()) {
         return undefined;
+      }
+
+      if (
+        this.app?.isChatView() &&
+        key.name === "tab" &&
+        this.app.isChatInputEmpty() &&
+        !this.app.isConversationSwitcherActive() &&
+        !this.app.hasConversationSwitcherTargets()
+      ) {
+        return { consume: true };
       }
 
       // Let focused components (Editor, SelectList) handle input directly
@@ -148,6 +158,9 @@ function rawInputToKey(data: string): UiKey | undefined {
   if (matchesKey(data, Key.escape) || matchesKey(data, Key.esc)) {
     return { sequence: data, name: "escape" };
   }
+  if (matchesKey(data, Key.tab)) {
+    return { sequence: data, name: "tab" };
+  }
   if (matchesKey(data, Key.backspace)) {
     return { sequence: data, name: "backspace" };
   }
@@ -194,11 +207,24 @@ function isGlobalChatKey(key: UiKey, app: WechatApp): boolean {
   if (key.ctrl === true || key.name === "escape") {
     return true;
   }
+  if (key.name === "tab" && app.isChatInputEmpty()) {
+    return true;
+  }
+  if (key.name === "tab" && (app.isConversationSwitcherActive() || app.hasConversationSwitcherTargets())) {
+    return true;
+  }
+  if (app.isConversationSwitcherActive() && (key.name === "left" || key.name === "right" || isEnterKey(key))) {
+    return true;
+  }
   // When autocomplete is active (typing a / command), let Editor handle up/down
   if ((key.name === "up" || key.name === "down") && app.isChatAutocompleteActive()) {
     return false;
   }
   return key.name === "up" || key.name === "down";
+}
+
+function isEnterKey(key: UiKey): boolean {
+  return key.name === "return" || key.name === "enter" || key.sequence === "\r" || key.sequence === "\n";
 }
 
 function isGlobalChatsKey(key: UiKey): boolean {

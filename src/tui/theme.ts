@@ -19,6 +19,7 @@ export const theme = {
   muted: chalk.dim,
   dim: chalk.gray,
   media: chalk.hex("#5f9fb7"),
+  unreadActive: chalk.bgHex("#245463").white,
 
   // Semantic — status indicators only
   success: chalk.green,
