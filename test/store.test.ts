@@ -124,6 +124,57 @@ describe("SqliteStore", () => {
     store.close();
   });
 
+  it("backfills and preserves useful group conversation titles over protocol placeholders", () => {
+    const store = new SqliteStore(tempDb());
+    store.setActiveAccount(accountA);
+    const sparseGroup: ContactInput = {
+      id: contactId("group", ["@@project"]),
+      protocolId: "@@project",
+      kind: "group",
+      displayName: "@@project"
+    };
+    const sparseConversation = conversationFromContact(sparseGroup);
+
+    store.saveMessage(
+      {
+        id: localMessageId([sparseConversation.id, "first"]),
+        conversationId: sparseConversation.id,
+        senderName: "Group member",
+        isSelf: false,
+        content: "first sparse message",
+        type: "text",
+        timestamp: 1_700_000_000_000
+      },
+      sparseConversation,
+      true
+    );
+    expect(store.findConversationById(sparseConversation.id)?.title).toBe("@@project");
+
+    store.upsertContact({
+      ...sparseGroup,
+      displayName: "Project Group",
+      nickName: "Project Group"
+    });
+    expect(store.findConversationById(sparseConversation.id)?.title).toBe("Project Group");
+
+    store.saveMessage(
+      {
+        id: localMessageId([sparseConversation.id, "second"]),
+        conversationId: sparseConversation.id,
+        senderName: "Group member",
+        isSelf: false,
+        content: "second sparse message",
+        type: "text",
+        timestamp: 1_700_000_100_000
+      },
+      sparseConversation,
+      true
+    );
+
+    expect(store.findConversationById(sparseConversation.id)?.title).toBe("Project Group");
+    store.close();
+  });
+
   it("backfills same-id placeholder sender names when a sparse contact becomes useful", () => {
     const store = new SqliteStore(tempDb());
     store.setActiveAccount(accountA);

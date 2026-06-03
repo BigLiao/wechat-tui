@@ -539,13 +539,22 @@ export class SqliteStore implements MessageStore {
     const accountId = this.requireActiveAccountId("upsert conversation");
     this.options.logger?.trace({ conversation: summarizeConversationInput(conversation) }, "upserting conversation");
     const now = Date.now();
+    const existing = this.findConversationById(conversation.id);
+    const conversationForStorage = stabilizeConversationForUpsert(conversation, existing);
     this.db
       .prepare(
         "INSERT INTO conversations (account_id, id, protocol_id, kind, title, unread_count, updated_at) VALUES (?, ?, ?, ?, ?, 0, ?) " +
           "ON CONFLICT(id) DO UPDATE SET account_id = excluded.account_id, protocol_id = excluded.protocol_id, kind = excluded.kind, " +
           "title = excluded.title, updated_at = excluded.updated_at"
       )
-      .run(accountId, conversation.id, conversation.protocolId ?? null, conversation.kind, conversation.title, now);
+      .run(
+        accountId,
+        conversationForStorage.id,
+        conversationForStorage.protocolId ?? null,
+        conversationForStorage.kind,
+        conversationForStorage.title,
+        now
+      );
 
     const saved = this.findConversationById(conversation.id);
     if (!saved) {
@@ -1746,6 +1755,17 @@ function stabilizeGroupMemberForUpsert(member: GroupMemberInput, existing: Group
     nickName: member.nickName ?? existing.nickName,
     alias: member.alias ?? existing.alias,
     raw
+  };
+}
+
+function stabilizeConversationForUpsert(conversation: ConversationInput, existing: ConversationRecord | undefined): ConversationInput {
+  if (!existing || isUsefulSenderName(conversation.title) || !isUsefulSenderName(existing.title)) {
+    return conversation;
+  }
+
+  return {
+    ...conversation,
+    title: existing.title
   };
 }
 
