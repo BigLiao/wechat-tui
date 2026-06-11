@@ -625,6 +625,15 @@ export class SqliteStore implements MessageStore {
     return conversation;
   }
 
+  hasMessage(messageId: string): boolean {
+    const accountId = this.currentAccountId();
+    if (!accountId) {
+      return false;
+    }
+    const row = this.db.prepare("SELECT 1 FROM messages WHERE account_id = ? AND id = ? LIMIT 1").get(accountId, messageId);
+    return !!row;
+  }
+
   saveMessage(message: MessageInput, conversation: ConversationInput, incrementUnread: boolean): MessageRecord {
     const unreadIncrement = conversation.kind === "public" ? 0 : incrementUnread ? 1 : 0;
     const accountId = this.requireActiveAccountId("save message");
@@ -761,12 +770,10 @@ export class SqliteStore implements MessageStore {
     }
     const rows = this.db
       .prepare(
-        "SELECT * FROM (" +
-          "SELECT * FROM messages WHERE account_id = ? AND conversation_id = ? ORDER BY timestamp DESC, created_at DESC LIMIT ?" +
-          ") ORDER BY timestamp ASC, created_at ASC"
+        "SELECT * FROM messages WHERE account_id = ? AND conversation_id = ? ORDER BY timestamp DESC, created_at DESC LIMIT ?"
       )
       .all(accountId, conversationId, limit) as unknown as MessageRow[];
-    const messages = rows.map(asMessage);
+    const messages = rows.reverse().map(asMessage);
     this.options.logger?.debug({ conversationId, limit, count: messages.length }, "listed messages");
     return messages;
   }
@@ -1660,9 +1667,14 @@ export class SqliteStore implements MessageStore {
       CREATE INDEX IF NOT EXISTS idx_group_members_account_group ON group_members(account_id, group_id);
       CREATE INDEX IF NOT EXISTS idx_group_members_account_member_protocol ON group_members(account_id, member_protocol_id);
       CREATE INDEX IF NOT EXISTS idx_conversations_account_protocol_id ON conversations(account_id, protocol_id);
-      CREATE INDEX IF NOT EXISTS idx_conversations_account_last_message_at ON conversations(account_id, last_message_at);
+      CREATE INDEX IF NOT EXISTS idx_conversations_account_recent_order
+        ON conversations(account_id, (last_message_at IS NULL), last_message_at DESC, updated_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_conversations_account_unread_order
+        ON conversations(account_id, last_message_at DESC, updated_at DESC)
+        WHERE kind <> 'public' AND unread_count > 0;
       CREATE INDEX IF NOT EXISTS idx_conversations_account_unread_count ON conversations(account_id, unread_count);
-      CREATE INDEX IF NOT EXISTS idx_messages_account_conversation_time ON messages(account_id, conversation_id, timestamp);
+      CREATE INDEX IF NOT EXISTS idx_messages_account_conversation_time_created
+        ON messages(account_id, conversation_id, timestamp DESC, created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_messages_account_sender_protocol ON messages(account_id, sender_protocol_id);
       CREATE INDEX IF NOT EXISTS idx_messages_account_content ON messages(account_id, content);
       CREATE INDEX IF NOT EXISTS idx_attachments_account_message_id ON attachments(account_id, message_id);

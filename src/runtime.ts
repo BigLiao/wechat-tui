@@ -73,6 +73,7 @@ export class WeChatRuntime extends EventEmitter {
   private exiting = false;
   private contactSnapshotApplied = false;
   private suppressSearchEnterUntil = 0;
+  private renderScheduled = false;
   private readonly fileRegistry = new FileRegistry();
   private readonly mediaCache = new MediaCache();
 
@@ -258,8 +259,9 @@ export class WeChatRuntime extends EventEmitter {
         this.options.logger?.warn({ message: summarizeIncomingMessage(message) }, "dropping message received before account is known");
         return;
       }
-      this.handleIncomingMessage(message);
-      this.render();
+      if (this.handleIncomingMessage(message)) {
+        this.scheduleRender();
+      }
     });
 
     this.protocol.on("logout", () => {
@@ -862,8 +864,15 @@ export class WeChatRuntime extends EventEmitter {
     }
   }
 
-  private handleIncomingMessage(incoming: IncomingProtocolMessage): void {
+  private handleIncomingMessage(incoming: IncomingProtocolMessage): boolean {
     const scopedIncoming = this.scopeIncomingMessage(incoming);
+    if (this.store.hasMessage(scopedIncoming.id)) {
+      this.options.logger?.debug(
+        { messageId: scopedIncoming.id, protocolMessageId: scopedIncoming.protocolMessageId },
+        "duplicate incoming message skipped"
+      );
+      return false;
+    }
     let conversationContact = this.store.upsertContact(this.contactFromConversationInput(scopedIncoming.conversation));
     let senderForMessage: { id: string; protocolId?: string; displayName: string } = scopedIncoming.sender;
     let senderKind: MessageInput["senderKind"] = scopedIncoming.isSelf ? "self" : "contact";
@@ -951,6 +960,7 @@ export class WeChatRuntime extends EventEmitter {
     if (!isPublic && isDownloadableType(scopedIncoming.type)) {
       void this.downloadAndCacheMedia(incoming, saved);
     }
+    return true;
   }
 
   private groupMemberFromSender(conversation: ConversationInput, sender: ContactInput): GroupMemberInput | undefined {
@@ -1004,10 +1014,21 @@ export class WeChatRuntime extends EventEmitter {
         "media downloaded and cached"
       );
       // Re-render so the hash/path association is visible
-      this.render();
+      this.scheduleRender();
     } catch (error) {
       this.options.logger?.warn({ err: error, messageId: saved.id, type: saved.type }, "media download failed");
     }
+  }
+
+  private scheduleRender(): void {
+    if (this.exiting || this.renderScheduled) {
+      return;
+    }
+    this.renderScheduled = true;
+    setImmediate(() => {
+      this.renderScheduled = false;
+      this.render();
+    });
   }
 
   private render(): void {

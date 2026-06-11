@@ -263,6 +263,7 @@ export interface MessageStore {
   upsertConversation(conversation: ConversationInput): ConversationRecord;
   mergeStaleConversationForContact(contact: ContactRecord, conversation: ConversationRecord): ConversationRecord;
   findConversationById(id: string): ConversationRecord | undefined;
+  hasMessage(messageId: string): boolean;
   saveMessage(message: MessageInput, conversation: ConversationInput, incrementUnread: boolean): MessageRecord;
   updateMessageRaw(messageId: string, raw: unknown): void;
   listRecentConversations(limit?: number): ConversationRecord[];

@@ -24,6 +24,10 @@ async function pressText(runtime: WeChatRuntime, value: string): Promise<void> {
   }
 }
 
+async function flushRender(): Promise<void> {
+  await new Promise<void>((resolve) => setImmediate(resolve));
+}
+
 class ContactsBeforeLoginProtocol extends EventEmitter implements WeChatProtocol {
   private readonly self: ContactInput = {
     id: contactId("self", ["early-self"]),
@@ -190,12 +194,14 @@ describe("WeChatRuntime", () => {
 
     await runtime.start();
     protocol.emitPublicMessage("City Guide", "article one", 1_700_000_000_000);
+    await flushRender();
 
     expect(renderer.latest.conversations).toHaveLength(1);
     expect(renderer.latest.conversations[0]?.title).toBe("公众号");
     expect(renderer.latest.conversations[0]?.unreadCount).toBe(0);
 
     protocol.emitPublicMessage("City Services", "article two", 1_700_000_100_000);
+    await flushRender();
 
     expect(renderer.latest.conversations).toHaveLength(1);
     expect(renderer.latest.conversations[0]?.title).toBe("公众号");
@@ -232,6 +238,46 @@ describe("WeChatRuntime", () => {
     store.close();
   });
 
+  it("skips duplicate incoming messages before refreshing runtime state", async () => {
+    const store = new SqliteStore(tempDb());
+    const protocol = new MockProtocol();
+    const renderer = new FakeRenderer();
+    const runtime = new WeChatRuntime(protocol, store, renderer, { initialHistoryLimit: 10 });
+
+    await runtime.start();
+    protocol.emitIncoming("Boss", "same message", 1_700_000_000_000);
+    await flushRender();
+    const renderCountAfterFirstMessage = renderer.states.length;
+    const unreadAfterFirstMessage = store.totalUnreadCount();
+
+    protocol.emitIncoming("Boss", "same message", 1_700_000_000_000);
+    await flushRender();
+
+    expect(renderer.states).toHaveLength(renderCountAfterFirstMessage);
+    expect(store.totalUnreadCount()).toBe(unreadAfterFirstMessage);
+    expect(store.listRecentConversations()).toHaveLength(1);
+    store.close();
+  });
+
+  it("coalesces renders for incoming message bursts", async () => {
+    const store = new SqliteStore(tempDb());
+    const protocol = new MockProtocol();
+    const renderer = new FakeRenderer();
+    const runtime = new WeChatRuntime(protocol, store, renderer, { initialHistoryLimit: 10 });
+
+    await runtime.start();
+    const renderCountBeforeMessages = renderer.states.length;
+
+    protocol.emitIncoming("Boss", "burst one", 1_700_000_000_000);
+    protocol.emitIncoming("Project A", "burst two", 1_700_000_100_000);
+
+    expect(renderer.states).toHaveLength(renderCountBeforeMessages);
+    await flushRender();
+    expect(renderer.states).toHaveLength(renderCountBeforeMessages + 1);
+    expect(renderer.latest.conversations.map((conversation) => conversation.title)).toEqual(["Project A", "Boss"]);
+    store.close();
+  });
+
   it("uses the stored useful contact name for a sparse incoming sender", async () => {
     const store = new SqliteStore(tempDb());
     const protocol = new MockProtocol();
@@ -261,6 +307,7 @@ describe("WeChatRuntime", () => {
       type: "text",
       timestamp: 1_700_000_000_000
     });
+    await flushRender();
 
     const storedConversation = renderer.latest.conversations.find((item) => item.title === "Boss");
     expect(storedConversation).toBeDefined();
@@ -298,6 +345,7 @@ describe("WeChatRuntime", () => {
       type: "text",
       timestamp: 1_700_000_000_000
     });
+    await flushRender();
 
     const storedConversation = renderer.latest.conversations.find((item) => item.title === "Project A");
     const message = store.listMessages(storedConversation?.id ?? "")[0];
@@ -338,6 +386,7 @@ describe("WeChatRuntime", () => {
       type: "text",
       timestamp: 1_700_000_000_000
     });
+    await flushRender();
 
     const storedConversation = renderer.latest.conversations.find((item) => item.title === "Late Project");
     expect(store.listMessages(storedConversation?.id ?? "")[0]?.senderName).toBe("Group member");
@@ -368,6 +417,7 @@ describe("WeChatRuntime", () => {
     expect(renderer.latest.view).toBe("chats");
 
     protocol.emitIncoming("Boss", "meet at three", 1_700_000_000_000);
+    await flushRender();
     expect(renderer.latest.view).toBe("chats");
     expect(renderer.latest.conversations[0]?.title).toBe("Boss");
     expect(renderer.latest.conversations[0]?.unreadCount).toBe(1);
@@ -384,6 +434,7 @@ describe("WeChatRuntime", () => {
     expect(renderer.latest.messages.map((message) => message.content)).toContain("yes");
 
     protocol.emitIncoming("Project A", "field changed", 1_700_000_100_000);
+    await flushRender();
     expect(renderer.latest.view).toBe("chat");
     expect(renderer.latest.messages.every((message) => message.conversationId === renderer.latest.activeConversation?.id)).toBe(true);
     expect(renderer.latest.unreadConversations.some((conversation) => conversation.title === "Project A")).toBe(true);
@@ -427,6 +478,7 @@ describe("WeChatRuntime", () => {
 
     await runtime.start();
     protocol.emitIncoming("Boss", "first", 1_700_000_000_000);
+    await flushRender();
     await runtime.handleKey(key.enter());
 
     await pressText(runtime, "reply");
@@ -452,10 +504,12 @@ describe("WeChatRuntime", () => {
 
     await runtime.start();
     protocol.emitIncoming("Boss", "first", 1_700_000_000_000);
+    await flushRender();
     await runtime.handleKey(key.enter());
     await pressText(runtime, "draft");
 
     protocol.emitIncoming("Project A", "field changed", 1_700_000_100_000);
+    await flushRender();
     const projectB: ContactInput = {
       id: contactId("private", ["project-b"]),
       protocolId: "@project-b",
@@ -472,6 +526,7 @@ describe("WeChatRuntime", () => {
       type: "text",
       timestamp: 1_700_000_200_000
     });
+    await flushRender();
     expect(renderer.latest.activeConversation?.title).toBe("Boss");
     expect(store.totalUnreadCount()).toBe(2);
 
@@ -545,6 +600,7 @@ describe("WeChatRuntime", () => {
 
     await runtime.start();
     protocol.emitIncoming("Boss", "hello", 1_700_000_000_000);
+    await flushRender();
     await runtime.handleKey(key.enter());
     await runtime.handleUiEvent({ type: "chat-submit", text: `/send "${imagePath}"` });
 
@@ -563,6 +619,7 @@ describe("WeChatRuntime", () => {
     await runtime.start();
     protocol.emitIncoming("Boss", "meet at three", 1_700_000_000_000);
     protocol.emitIncoming("Project A", "field changed", 1_700_000_100_000);
+    await flushRender();
 
     // Navigate to search item (2 conversations + 1 search item = index 2)
     await runtime.handleKey(key.down());
@@ -738,6 +795,7 @@ describe("WeChatRuntime", () => {
     const runtime = new WeChatRuntime(protocol, store, renderer, { initialHistoryLimit: 10 });
     await runtime.start();
     protocol.emitIncoming("Boss", "new incoming", 1_700_000_100_000);
+    await flushRender();
 
     const bossConversations = store.listRecentConversations().filter((conversation) => conversation.title === "Boss");
     expect(bossConversations).toHaveLength(1);
@@ -780,6 +838,7 @@ describe("WeChatRuntime", () => {
     await runtime.start();
     protocol.emitIncoming("Boss", "meet at three", 1_700_000_000_000);
     protocol.emitIncoming("Project A", "field changed", 1_700_000_100_000);
+    await flushRender();
 
     const boss = renderer.latest.conversations.find((conversation) => conversation.title === "Boss");
     expect(boss).toBeDefined();
