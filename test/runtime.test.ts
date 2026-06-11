@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { MockProtocol } from "../src/protocol/mock-protocol.js";
 import { WeChatRuntime } from "../src/runtime.js";
 import { SqliteStore } from "../src/store/sqlite-store.js";
-import type { ConnectionState, ContactInput, UserProfile, WeChatProtocol } from "../src/types.js";
+import type { ConnectionState, ContactInput, ProtocolQrEvent, UserProfile, WeChatProtocol } from "../src/types.js";
 import { contactId, conversationFromContact, localMessageId } from "../src/util/ids.js";
 import { FakeRenderer, key } from "./helpers.js";
 
@@ -29,6 +29,8 @@ async function flushRender(): Promise<void> {
 }
 
 class ContactsBeforeLoginProtocol extends EventEmitter implements WeChatProtocol {
+  startedWithSessionData: unknown;
+
   private readonly self: ContactInput = {
     id: contactId("self", ["early-self"]),
     protocolId: "@early-self",
@@ -47,7 +49,8 @@ class ContactsBeforeLoginProtocol extends EventEmitter implements WeChatProtocol
     }
   ];
 
-  async start(): Promise<void> {
+  async start(sessionData?: unknown): Promise<void> {
+    this.startedWithSessionData = sessionData;
     this.emit("state", "syncing" satisfies ConnectionState);
     this.emit("contacts", this.contacts);
     this.emit("state", "online" satisfies ConnectionState);
@@ -82,6 +85,47 @@ class ContactsBeforeLoginProtocol extends EventEmitter implements WeChatProtocol
       protocolId: this.self.protocolId,
       displayName: this.self.displayName
     };
+  }
+
+  getSessionData(): unknown | undefined {
+    return undefined;
+  }
+}
+
+class QrOnlyProtocol extends EventEmitter implements WeChatProtocol {
+  async start(): Promise<void> {
+    this.emit("state", "waiting_scan" satisfies ConnectionState);
+    this.emit("qr", {
+      uuid: "qr-only",
+      loginUrl: "mock://login",
+      qrUrl: "mock://qrcode"
+    } satisfies ProtocolQrEvent);
+  }
+
+  async reconnect(): Promise<void> {}
+
+  async logout(): Promise<void> {
+    this.emit("logout");
+  }
+
+  async sendText(): Promise<{ messageId?: string; raw?: unknown }> {
+    return {};
+  }
+
+  async sendFile(): Promise<{ messageId?: string; raw?: unknown }> {
+    return {};
+  }
+
+  async downloadMedia(): Promise<undefined> {
+    return undefined;
+  }
+
+  async getContacts(): Promise<ContactInput[]> {
+    return [];
+  }
+
+  getCurrentUser(): UserProfile | undefined {
+    return undefined;
   }
 
   getSessionData(): unknown | undefined {
@@ -172,6 +216,39 @@ afterEach(() => {
 });
 
 describe("WeChatRuntime", () => {
+  it("shows the QR login screen without the startup splash when no saved session exists", async () => {
+    const store = new SqliteStore(tempDb());
+    const protocol = new QrOnlyProtocol();
+    const renderer = new FakeRenderer();
+    const runtime = new WeChatRuntime(protocol, store, renderer, { initialHistoryLimit: 10 });
+
+    await runtime.start();
+
+    expect(renderer.states.some((state) => state.view === "startup")).toBe(false);
+    expect(renderer.latest.view).toBe("login");
+    expect(renderer.latest.qr?.uuid).toBe("qr-only");
+    store.close();
+  });
+
+  it("shows the startup splash only after a saved session restores login", async () => {
+    const store = new SqliteStore(tempDb());
+    store.setSessionData({ restored: true });
+    const protocol = new ContactsBeforeLoginProtocol();
+    const renderer = new FakeRenderer();
+    const runtime = new WeChatRuntime(protocol, store, renderer, {
+      initialHistoryLimit: 10,
+      minimumStartupMs: 0
+    });
+
+    await runtime.start();
+
+    expect(protocol.startedWithSessionData).toEqual({ restored: true });
+    expect(renderer.states.some((state) => state.view === "startup")).toBe(true);
+    expect(renderer.latest.view).toBe("chats");
+    expect(renderer.latest.accountName).toBe("Early User");
+    store.close();
+  });
+
   it("handles contacts that arrive before the login event during session restart", async () => {
     const store = new SqliteStore(tempDb());
     const protocol = new ContactsBeforeLoginProtocol();

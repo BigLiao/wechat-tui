@@ -8,6 +8,7 @@ import { CommandPanel } from "../src/tui/components/command-panel.js";
 import { ConfirmPanel } from "../src/tui/components/confirm-panel.js";
 import { theme } from "../src/tui/theme.js";
 import { FileRegistry } from "../src/util/file-hash.js";
+import { createStartupRenderState } from "../src/startup-state.js";
 import type { RenderState, UiEvent } from "../src/types.js";
 
 const defaultChalkLevel = chalk.level;
@@ -108,6 +109,22 @@ describe("WorkbenchTerminalRenderer", () => {
 
     renderer.stop();
     expect(terminal.titles).toEqual(["WeChat", "WeChat (2)", "WeChat"]);
+  });
+
+  it("renders the animated startup moon scene", () => {
+    const output = renderState(
+      createStartupRenderState({
+        frame: 1,
+        message: "Preparing local data..."
+      }),
+      { width: 72, rows: 24 }
+    );
+
+    const plain = stripAnsi(output);
+    expect(plain).toContain("WECHAT TUI");
+    expect(plain).toContain("Preparing local data");
+    expect(plain).toContain("/|\\");
+    expect(plain).toContain("_________./___\\.");
   });
 
   it("forwards tab from the chat editor to runtime", () => {

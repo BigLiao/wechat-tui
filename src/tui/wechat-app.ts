@@ -6,6 +6,7 @@ import { LoginScreen } from "./login-screen.js";
 import { ConversationScreen } from "./conversation-screen.js";
 import { ChatScreen } from "./chat-screen.js";
 import { ContactSearchScreen } from "./contact-search-screen.js";
+import { StartupScreen } from "./startup-screen.js";
 import { ChatEditor } from "./components/chat-editor.js";
 import { CommandPanel } from "./components/command-panel.js";
 import { ConfirmPanel } from "./components/confirm-panel.js";
@@ -53,6 +54,7 @@ function emptyState(): RenderState {
 export class WechatApp implements Component {
   private state: RenderState = emptyState();
   private readonly loginScreen = new LoginScreen();
+  private readonly startupScreen = new StartupScreen();
   private readonly conversationScreen = new ConversationScreen();
   private readonly chatScreen: ChatScreen;
   private readonly contactSearchScreen = new ContactSearchScreen();
@@ -257,6 +259,8 @@ export class WechatApp implements Component {
   render(width: number): string[] {
     const rows = this.tui.terminal.rows;
     switch (this.state.view) {
+      case "startup":
+        return this.startupScreen.render(this.state, width, rows);
       case "login":
         return this.loginScreen.render(this.state, width, rows);
       case "chats": {

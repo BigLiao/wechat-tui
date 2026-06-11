@@ -12,6 +12,8 @@ import { WorkbenchTerminalRenderer } from "./ui/workbench-renderer.js";
 import { checkForPackageUpdate } from "./update-check.js";
 import { readPackageInfo } from "./version.js";
 
+const MINIMUM_STARTUP_MS = 3000;
+
 async function main(): Promise<void> {
   const config = parseCliConfig(process.argv.slice(2));
   const packageInfo = readPackageInfo();
@@ -44,6 +46,7 @@ async function main(): Promise<void> {
   const runtime = new WeChatRuntime(protocol, store, renderer, {
     logger,
     debugLogPath: logPath,
+    minimumStartupMs: MINIMUM_STARTUP_MS,
     updateCheck: () =>
       checkForPackageUpdate({
         packageName: packageInfo.name,
@@ -61,6 +64,7 @@ async function main(): Promise<void> {
     try {
       logger?.info({ code }, "shutdown");
       store.close();
+      renderer.stop();
       logger?.flush?.();
     } finally {
       process.exit(code);
@@ -76,7 +80,14 @@ async function main(): Promise<void> {
     void runtime.handleKey({ sequence: "c", name: "c", ctrl: true });
   });
 
-  await runtime.start();
+  try {
+    await runtime.start();
+  } catch (error) {
+    store.close();
+    renderer.stop();
+    logger?.flush?.();
+    throw error;
+  }
 }
 
 main().catch((error: unknown) => {

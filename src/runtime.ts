@@ -38,6 +38,7 @@ import { FileRegistry } from "./util/file-hash.js";
 import { MediaCache, extensionFromContentType } from "./util/media-cache.js";
 import { openWithSystem, revealInFileManager } from "./util/open.js";
 import { normalizeUserFilePath } from "./util/path-input.js";
+import { createStartupRenderState } from "./startup-state.js";
 
 export interface RuntimeOptions {
   initialHistoryLimit?: number;
@@ -46,9 +47,11 @@ export interface RuntimeOptions {
   logger?: Logger;
   debugLogPath?: string;
   updateCheck?: () => Promise<UpdateInfo | undefined>;
+  minimumStartupMs?: number;
 }
 
 const SEARCH_ENTER_SUPPRESSION_MS = 100;
+const STARTUP_FRAME_MS = 160;
 
 export class WeChatRuntime extends EventEmitter {
   private view: AppView = "login";
@@ -74,6 +77,12 @@ export class WeChatRuntime extends EventEmitter {
   private contactSnapshotApplied = false;
   private suppressSearchEnterUntil = 0;
   private renderScheduled = false;
+  private startupActive = false;
+  private startupFrame = 0;
+  private startupMessage = "Opening WeChat TUI...";
+  private startupStartedAt = 0;
+  private startupTimer?: ReturnType<typeof setInterval>;
+  private pendingStoredSessionStartup = false;
   private readonly fileRegistry = new FileRegistry();
   private readonly mediaCache = new MediaCache();
 
@@ -101,10 +110,20 @@ export class WeChatRuntime extends EventEmitter {
         }
       }
     );
-    this.statusMessage = "Starting protocol and loading local cache...";
+    const sessionData = this.store.getSessionData();
+    this.pendingStoredSessionStartup = sessionData !== undefined;
+    this.statusMessage = sessionData ? "Checking saved WeChat session..." : "Waiting for WeChat login...";
     this.startUpdateCheck();
     this.render();
-    await this.protocol.start(this.store.getSessionData());
+    try {
+      await this.protocol.start(sessionData);
+      if (this.startupActive) {
+        await waitForMinimumStartup(this.startupStartedAt, this.options.minimumStartupMs ?? 0);
+      }
+    } finally {
+      this.pendingStoredSessionStartup = false;
+      this.stopStartupAnimation();
+    }
     this.options.logger?.info("runtime start completed");
     this.render();
   }
@@ -170,6 +189,12 @@ export class WeChatRuntime extends EventEmitter {
         this.requestExit();
         return;
       }
+      if (this.startupActive) {
+        if (isQuitKey(key)) {
+          this.requestExit();
+        }
+        return;
+      }
 
       switch (this.view) {
         case "login":
@@ -207,6 +232,7 @@ export class WeChatRuntime extends EventEmitter {
 
     this.protocol.on("qr", (event) => {
       this.options.logger?.info({ uuid: event.uuid, qrUrl: event.qrUrl }, "login QR received");
+      this.pendingStoredSessionStartup = false;
       this.qr = event;
       this.view = "login";
       this.statusMessage = "Scan the QR code with WeChat.";
@@ -220,6 +246,8 @@ export class WeChatRuntime extends EventEmitter {
     });
 
     this.protocol.on("login", (user) => {
+      const showStartup = this.pendingStoredSessionStartup;
+      this.pendingStoredSessionStartup = false;
       this.activateAccount(user);
       this.accountName = user.displayName;
       this.qr = undefined;
@@ -230,6 +258,9 @@ export class WeChatRuntime extends EventEmitter {
         { user: { id: user.id, protocolId: user.protocolId, displayName: user.displayName } },
         "runtime login event"
       );
+      if (showStartup) {
+        this.startStartupAnimation("Loading your WeChat workspace...");
+      }
       this.render();
     });
 
@@ -1031,8 +1062,40 @@ export class WeChatRuntime extends EventEmitter {
     });
   }
 
+  private startStartupAnimation(message: string): void {
+    this.startupActive = true;
+    this.startupMessage = message;
+    this.startupStartedAt = Date.now();
+    this.startupFrame = 0;
+    if (this.startupTimer) {
+      clearInterval(this.startupTimer);
+    }
+    this.startupTimer = setInterval(() => {
+      this.startupFrame += 1;
+      this.render();
+    }, STARTUP_FRAME_MS);
+  }
+
+  private stopStartupAnimation(): void {
+    if (this.startupTimer) {
+      clearInterval(this.startupTimer);
+      this.startupTimer = undefined;
+    }
+    this.startupActive = false;
+  }
+
   private render(): void {
     if (this.exiting) {
+      return;
+    }
+    if (this.startupActive) {
+      this.renderer.render(
+        createStartupRenderState({
+          frame: this.startupFrame,
+          message: this.startupMessage,
+          debugLogPath: this.options.debugLogPath
+        })
+      );
       return;
     }
     const state = this.buildRenderState();
@@ -1416,6 +1479,14 @@ function isTabKey(key: UiKey): boolean {
 
 function isEnterKey(key: UiKey): boolean {
   return key.name === "return" || key.name === "enter" || key.sequence === "\r" || key.sequence === "\n";
+}
+
+async function waitForMinimumStartup(startedAt: number, minimumMs: number): Promise<void> {
+  const remaining = startedAt + minimumMs - Date.now();
+  if (remaining <= 0) {
+    return;
+  }
+  await new Promise<void>((resolve) => setTimeout(resolve, remaining));
 }
 
 function isEscapeKey(key: UiKey): boolean {

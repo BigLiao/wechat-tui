@@ -12,7 +12,7 @@ export type ConnectionState =
   | "logout"
   | "error";
 
-export type AppView = "login" | "chats" | "chat" | "search";
+export type AppView = "startup" | "login" | "chats" | "chat" | "search";
 export type ConversationFocus = "list" | "input";
 export type ContactKind = "private" | "group" | "public" | "special" | "self";
 export type MessageKind =
@@ -214,6 +214,8 @@ export interface RenderState {
   errorMessage?: string;
   debugLogPath?: string;
   updateInfo?: UpdateInfo;
+  startupFrame?: number;
+  startupMessage?: string;
   conversations: ConversationRecord[];
   conversationQuery: string;
   selectedConversationIndex: number;
