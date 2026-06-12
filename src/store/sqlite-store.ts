@@ -1,7 +1,9 @@
-import { mkdirSync } from "node:fs";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 import type { Logger } from "pino";
-import type { DatabaseSync } from "node:sqlite";
+import sqlite3 from "sqlite3";
+import { open, type Database, type ISqlite } from "sqlite";
 import type {
   ContactInput,
   ContactKind,
@@ -32,7 +34,6 @@ import {
   normalizeComparableText
 } from "../util/group-name.js";
 import { conversationIdFromContact, groupMemberId } from "../util/ids.js";
-import { loadNodeSqlite } from "../util/node-sqlite.js";
 import { cleanText } from "../util/text.js";
 
 interface ContactRow {
@@ -197,40 +198,89 @@ function asMessage(row: MessageRow): MessageRecord {
   };
 }
 
+class AsyncSqliteDatabase {
+  constructor(private readonly db: Database) {}
+
+  prepare(sql: string): AsyncSqliteStatement {
+    return new AsyncSqliteStatement(this.db, sql);
+  }
+
+  async exec(sql: string): Promise<void> {
+    await this.db.exec(sql);
+  }
+
+  async close(): Promise<void> {
+    await this.db.close();
+  }
+}
+
+class AsyncSqliteStatement {
+  constructor(
+    private readonly db: Database,
+    private readonly sql: string
+  ) {}
+
+  async run(...params: unknown[]): Promise<ISqlite.RunResult> {
+    return this.db.run(this.sql, ...params);
+  }
+
+  async get<T = unknown>(...params: unknown[]): Promise<T | undefined> {
+    return this.db.get<T>(this.sql, ...params);
+  }
+
+  async all<T = unknown>(...params: unknown[]): Promise<T[]> {
+    return this.db.all<T[]>(this.sql, ...params);
+  }
+}
+
 export class SqliteStore implements MessageStore {
-  private readonly db: DatabaseSync;
+  private readonly db: AsyncSqliteDatabase;
+  private readonly writeContext = new AsyncLocalStorage<boolean>();
+  private writeQueue: Promise<void> = Promise.resolve();
   private activeAccountId?: string;
 
-  constructor(
+  private constructor(
     private readonly dbPath: string,
-    private readonly options: { logger?: Logger } = {}
+    private readonly options: { logger?: Logger },
+    db: Database
   ) {
-    this.options.logger?.debug({ dbPath }, "opening sqlite store");
-    mkdirSync(dirname(dbPath), { recursive: true });
-    const { DatabaseSync } = loadNodeSqlite();
-    this.db = new DatabaseSync(dbPath);
-    this.migrate();
-    this.options.logger?.debug({ dbPath }, "sqlite store ready");
+    this.db = new AsyncSqliteDatabase(db);
   }
 
-  close(): void {
+  static async open(dbPath: string, options: { logger?: Logger } = {}): Promise<SqliteStore> {
+    options.logger?.debug({ dbPath }, "opening sqlite store");
+    await mkdir(dirname(dbPath), { recursive: true });
+    const db = await open({
+      filename: dbPath,
+      driver: sqlite3.Database
+    });
+    const store = new SqliteStore(dbPath, options, db);
+    await store.migrate();
+    options.logger?.debug({ dbPath }, "sqlite store ready");
+    return store;
+  }
+
+  async close(): Promise<void> {
     this.options.logger?.debug({ dbPath: this.dbPath }, "closing sqlite store");
-    this.db.close();
+    await this.writeQueue;
+    await this.db.close();
   }
 
-  setActiveAccount(account: UserProfile): void {
-    this.activeAccountId = account.id;
-    this.db
-      .prepare(
-        "INSERT INTO accounts (id, protocol_id, display_name, raw_json, updated_at) VALUES (?, ?, ?, ?, ?) " +
-          "ON CONFLICT(id) DO UPDATE SET protocol_id = excluded.protocol_id, display_name = excluded.display_name, " +
-          "raw_json = excluded.raw_json, updated_at = excluded.updated_at"
-      )
-      .run(account.id, account.protocolId ?? null, account.displayName, jsonString(account.raw), Date.now());
-    this.options.logger?.debug(
-      { accountId: account.id, protocolId: account.protocolId, displayName: account.displayName },
-      "active store account set"
-    );
+  async setActiveAccount(account: UserProfile): Promise<void> {
+    await this.enqueueWrite(async () => {
+      this.activeAccountId = account.id;
+      await this.db
+        .prepare(
+          "INSERT INTO accounts (id, protocol_id, display_name, raw_json, updated_at) VALUES (?, ?, ?, ?, ?) " +
+            "ON CONFLICT(id) DO UPDATE SET protocol_id = excluded.protocol_id, display_name = excluded.display_name, " +
+            "raw_json = excluded.raw_json, updated_at = excluded.updated_at"
+        )
+        .run(account.id, account.protocolId ?? null, account.displayName, jsonString(account.raw), Date.now());
+      this.options.logger?.debug(
+        { accountId: account.id, protocolId: account.protocolId, displayName: account.displayName },
+        "active store account set"
+      );
+    });
   }
 
   clearActiveAccount(): void {
@@ -238,164 +288,189 @@ export class SqliteStore implements MessageStore {
     this.activeAccountId = undefined;
   }
 
-  getSessionData(): unknown | undefined {
-    const row = this.db.prepare("SELECT value FROM kv WHERE key = ?").get("wechat.session") as
+  async getSessionData(): Promise<unknown | undefined> {
+    const row = await this.db.prepare("SELECT value FROM kv WHERE key = ?").get("wechat.session") as
       | { value: string }
       | undefined;
     this.options.logger?.debug({ hasSessionData: !!row }, "loaded session data marker");
     return row ? parseJson(row.value) : undefined;
   }
 
-  setSessionData(data: unknown): void {
-    if (data === undefined) {
-      this.clearSessionData();
-      return;
-    }
-    this.options.logger?.debug("saving session data marker");
-    this.db
-      .prepare(
-        "INSERT INTO kv (key, value, updated_at) VALUES (?, ?, ?) " +
-          "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at"
-      )
-      .run("wechat.session", JSON.stringify(data), Date.now());
+  async setSessionData(data: unknown): Promise<void> {
+    return this.enqueueWrite(async () => {
+      if (data === undefined) {
+        await this.clearSessionData();
+        return;
+      }
+      this.options.logger?.debug("saving session data marker");
+      await this.db
+        .prepare(
+          "INSERT INTO kv (key, value, updated_at) VALUES (?, ?, ?) " +
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at"
+        )
+        .run("wechat.session", JSON.stringify(data), Date.now());
+    });
   }
 
-  clearSessionData(): void {
-    this.options.logger?.debug("clearing session data");
-    this.db.prepare("DELETE FROM kv WHERE key = ?").run("wechat.session");
+  async clearSessionData(): Promise<void> {
+    return this.enqueueWrite(async () => {
+      this.options.logger?.debug("clearing session data");
+      await this.db.prepare("DELETE FROM kv WHERE key = ?").run("wechat.session");
+    });
   }
 
-  clearData(): void {
-    this.options.logger?.debug("clearing all data except session");
-    this.db.prepare("DELETE FROM messages").run();
-    this.db.prepare("DELETE FROM attachments").run();
-    this.db.prepare("DELETE FROM group_members").run();
-    this.db.prepare("DELETE FROM conversations").run();
-    this.db.prepare("DELETE FROM contacts").run();
-    this.db.prepare("DELETE FROM accounts").run();
-    this.db.prepare("DELETE FROM kv WHERE key != ?").run("wechat.session");
+  async clearData(): Promise<void> {
+    return this.enqueueWrite(async () => {
+      this.options.logger?.debug("clearing all data except session");
+      await this.db.prepare("DELETE FROM messages").run();
+      await this.db.prepare("DELETE FROM attachments").run();
+      await this.db.prepare("DELETE FROM group_members").run();
+      await this.db.prepare("DELETE FROM conversations").run();
+      await this.db.prepare("DELETE FROM contacts").run();
+      await this.db.prepare("DELETE FROM accounts").run();
+      await this.db.prepare("DELETE FROM kv WHERE key != ?").run("wechat.session");
+    });
   }
 
-  upsertContact(contact: ContactInput): ContactRecord {
-    const accountId = this.requireActiveAccountId("upsert contact");
-    const now = Date.now();
-    const existing = this.findContactById(contact.id);
-    const contactForStorage = stabilizeContactForUpsert(contact, existing);
-    this.db
-      .prepare(
-        "INSERT INTO contacts " +
-          "(account_id, id, protocol_id, kind, display_name, remark_name, nick_name, alias, is_self, is_stale, raw_json, updated_at) " +
-          "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?) " +
-          "ON CONFLICT(id) DO UPDATE SET " +
-          "account_id = excluded.account_id, protocol_id = excluded.protocol_id, kind = excluded.kind, display_name = excluded.display_name, " +
-          "remark_name = excluded.remark_name, nick_name = excluded.nick_name, alias = excluded.alias, " +
-          "is_self = excluded.is_self, is_stale = 0, raw_json = excluded.raw_json, updated_at = excluded.updated_at"
-      )
-      .run(
-        accountId,
-        contactForStorage.id,
-        contactForStorage.protocolId ?? null,
-        contactForStorage.kind,
-        contactForStorage.displayName,
-        contactForStorage.remarkName ?? null,
-        contactForStorage.nickName ?? null,
-        contactForStorage.alias ?? null,
-        contactForStorage.isSelf ? 1 : 0,
-        jsonString(contactForStorage.raw),
-        now
+  async upsertContact(contact: ContactInput): Promise<ContactRecord> {
+    return this.enqueueWrite(async () => {
+      const accountId = this.requireActiveAccountId("upsert contact");
+      const now = Date.now();
+      const existing = await this.findContactById(contact.id);
+      const contactForStorage = stabilizeContactForUpsert(contact, existing);
+      await this.db
+        .prepare(
+          "INSERT INTO contacts " +
+            "(account_id, id, protocol_id, kind, display_name, remark_name, nick_name, alias, is_self, is_stale, raw_json, updated_at) " +
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?) " +
+            "ON CONFLICT(id) DO UPDATE SET " +
+            "account_id = excluded.account_id, protocol_id = excluded.protocol_id, kind = excluded.kind, display_name = excluded.display_name, " +
+            "remark_name = excluded.remark_name, nick_name = excluded.nick_name, alias = excluded.alias, " +
+            "is_self = excluded.is_self, is_stale = 0, raw_json = excluded.raw_json, updated_at = excluded.updated_at"
+        )
+        .run(
+          accountId,
+          contactForStorage.id,
+          contactForStorage.protocolId ?? null,
+          contactForStorage.kind,
+          contactForStorage.displayName,
+          contactForStorage.remarkName ?? null,
+          contactForStorage.nickName ?? null,
+          contactForStorage.alias ?? null,
+          contactForStorage.isSelf ? 1 : 0,
+          jsonString(contactForStorage.raw),
+          now
+        );
+
+      const saved = await this.findContactById(contactForStorage.id);
+      if (!saved) {
+        throw new Error(`Failed to save contact ${contact.id}`);
+      }
+      await this.backfillConversationTitlesFromContact(saved);
+      await this.backfillSenderNameFromContact(saved);
+      await this.backfillGroupMemberSenderNamesFromContact(saved);
+      this.options.logger?.trace(
+        {
+          id: saved.id,
+          protocolId: saved.protocolId,
+          kind: saved.kind,
+          displayName: saved.displayName,
+          isSelf: saved.isSelf
+        },
+        "contact upserted"
       );
-
-    const saved = this.findContactById(contactForStorage.id);
-    if (!saved) {
-      throw new Error(`Failed to save contact ${contact.id}`);
-    }
-    this.backfillConversationTitlesFromContact(saved);
-    this.backfillSenderNameFromContact(saved);
-    this.backfillGroupMemberSenderNamesFromContact(saved);
-    this.options.logger?.trace(
-      {
-        id: saved.id,
-        protocolId: saved.protocolId,
-        kind: saved.kind,
-        displayName: saved.displayName,
-        isSelf: saved.isSelf
-      },
-      "contact upserted"
-    );
-    return saved;
-  }
-
-  upsertContacts(contacts: ContactInput[]): ContactRecord[] {
-    this.options.logger?.debug(summarizeContacts(contacts), "upserting contacts");
-    this.db.exec("BEGIN");
-    try {
-      const saved = contacts.map((contact) => this.upsertContact(contact));
-      this.db.exec("COMMIT");
-      this.options.logger?.debug({ count: saved.length }, "contacts upserted");
       return saved;
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      this.options.logger?.error({ err: error, count: contacts.length }, "failed to upsert contacts");
-      throw error;
-    }
+    });
   }
 
-  upsertGroupMember(member: GroupMemberInput): GroupMemberRecord {
-    const accountId = this.requireActiveAccountId("upsert group member");
-    const now = Date.now();
-    const existing = this.findGroupMemberById(member.id);
-    const memberForStorage = this.enrichGroupMemberFromContact(
-      stabilizeGroupMemberForUpsert(member, existing),
-      accountId
-    );
-    this.db
-      .prepare(
-        "INSERT INTO group_members " +
-          "(account_id, id, group_id, group_protocol_id, member_protocol_id, display_name, remark_name, nick_name, alias, raw_json, updated_at) " +
-          "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
-          "ON CONFLICT(id) DO UPDATE SET " +
-          "account_id = excluded.account_id, group_id = excluded.group_id, group_protocol_id = excluded.group_protocol_id, " +
-          "member_protocol_id = excluded.member_protocol_id, display_name = excluded.display_name, " +
-          "remark_name = excluded.remark_name, nick_name = excluded.nick_name, alias = excluded.alias, " +
-          "raw_json = excluded.raw_json, updated_at = excluded.updated_at"
-      )
-      .run(
-        accountId,
-        memberForStorage.id,
-        memberForStorage.groupId,
-        memberForStorage.groupProtocolId ?? null,
-        memberForStorage.memberProtocolId,
-        memberForStorage.displayName,
-        memberForStorage.remarkName ?? null,
-        memberForStorage.nickName ?? null,
-        memberForStorage.alias ?? null,
-        jsonString(memberForStorage.raw),
-        now
+  async upsertContacts(contacts: ContactInput[]): Promise<ContactRecord[]> {
+    return this.enqueueWrite(async () => {
+      this.options.logger?.debug(summarizeContacts(contacts), "upserting contacts");
+      await this.db.exec("BEGIN");
+      try {
+        const saved: ContactRecord[] = [];
+        for (const contact of contacts) {
+          saved.push(await this.upsertContact(contact));
+        }
+        await this.db.exec("COMMIT");
+        this.options.logger?.debug({ count: saved.length }, "contacts upserted");
+        return saved;
+      } catch (error) {
+        await this.db.exec("ROLLBACK");
+        this.options.logger?.error({ err: error, count: contacts.length }, "failed to upsert contacts");
+        throw error;
+      }
+    });
+  }
+
+  async upsertGroupMember(member: GroupMemberInput): Promise<GroupMemberRecord> {
+    return this.enqueueWrite(async () => {
+      const accountId = this.requireActiveAccountId("upsert group member");
+      const now = Date.now();
+      const existing = await this.findGroupMemberById(member.id);
+      const memberForStorage = await this.enrichGroupMemberFromContact(
+        stabilizeGroupMemberForUpsert(member, existing),
+        accountId
       );
+      await this.db
+        .prepare(
+          "INSERT INTO group_members " +
+            "(account_id, id, group_id, group_protocol_id, member_protocol_id, display_name, remark_name, nick_name, alias, raw_json, updated_at) " +
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
+            "ON CONFLICT(id) DO UPDATE SET " +
+            "account_id = excluded.account_id, group_id = excluded.group_id, group_protocol_id = excluded.group_protocol_id, " +
+            "member_protocol_id = excluded.member_protocol_id, display_name = excluded.display_name, " +
+            "remark_name = excluded.remark_name, nick_name = excluded.nick_name, alias = excluded.alias, " +
+            "raw_json = excluded.raw_json, updated_at = excluded.updated_at"
+        )
+        .run(
+          accountId,
+          memberForStorage.id,
+          memberForStorage.groupId,
+          memberForStorage.groupProtocolId ?? null,
+          memberForStorage.memberProtocolId,
+          memberForStorage.displayName,
+          memberForStorage.remarkName ?? null,
+          memberForStorage.nickName ?? null,
+          memberForStorage.alias ?? null,
+          jsonString(memberForStorage.raw),
+          now
+        );
 
-    const saved = this.findGroupMemberById(memberForStorage.id);
-    if (!saved) {
-      throw new Error(`Failed to save group member ${member.id}`);
-    }
-    this.backfillSenderNameFromGroupMember(saved, existing?.displayName);
-    this.options.logger?.trace(
-      {
-        id: saved.id,
-        groupId: saved.groupId,
-        groupProtocolId: saved.groupProtocolId,
-        memberProtocolId: saved.memberProtocolId,
-        displayName: saved.displayName
-      },
-      "group member upserted"
-    );
-    return saved;
+      const saved = await this.findGroupMemberById(memberForStorage.id);
+      if (!saved) {
+        throw new Error(`Failed to save group member ${member.id}`);
+      }
+      await this.backfillSenderNameFromGroupMember(saved, existing?.displayName);
+      this.options.logger?.trace(
+        {
+          id: saved.id,
+          groupId: saved.groupId,
+          groupProtocolId: saved.groupProtocolId,
+          memberProtocolId: saved.memberProtocolId,
+          displayName: saved.displayName
+        },
+        "group member upserted"
+      );
+      return saved;
+    });
   }
 
-  private enrichGroupMemberFromContact(member: GroupMemberInput, accountId: string | null): GroupMemberInput {
+  private enqueueWrite<T>(operation: () => Promise<T>): Promise<T> {
+    if (this.writeContext.getStore()) {
+      return operation();
+    }
+    const run = () => this.writeContext.run(true, operation);
+    const next = this.writeQueue.then(run, run);
+    this.writeQueue = next.then(() => undefined, () => undefined);
+    return next;
+  }
+
+  private async enrichGroupMemberFromContact(member: GroupMemberInput, accountId: string | null): Promise<GroupMemberInput> {
     if (isUsefulSenderName(member.displayName)) {
       return member;
     }
-    const contactName = this.usefulContactNameForProtocol(accountId, member.memberProtocolId);
+    const contactName = await this.usefulContactNameForProtocol(accountId, member.memberProtocolId);
     if (!contactName) {
       return member;
     }
@@ -408,8 +483,8 @@ export class SqliteStore implements MessageStore {
     };
   }
 
-  private usefulContactNameForProtocol(accountId: string | null, protocolId: string): UsefulContactName | undefined {
-    const row = this.db
+  private async usefulContactNameForProtocol(accountId: string | null, protocolId: string): Promise<UsefulContactName | undefined> {
+    const row = await this.db
       .prepare(
         "SELECT display_name, remark_name, nick_name, alias FROM contacts " +
           "WHERE account_id IS ? AND is_self = 0 AND kind = 'private' AND protocol_id = ? " +
@@ -428,30 +503,32 @@ export class SqliteStore implements MessageStore {
     };
   }
 
-  markAllContactsStale(): void {
-    const accountId = this.currentAccountId();
-    if (!accountId) {
-      return;
-    }
-    this.db
-      .prepare("UPDATE contacts SET is_stale = 1 WHERE account_id = ? AND is_self = 0")
-      .run(accountId);
-    this.options.logger?.debug({ accountId }, "marked all contacts stale");
+  async markAllContactsStale(): Promise<void> {
+    return this.enqueueWrite(async () => {
+      const accountId = this.currentAccountId();
+      if (!accountId) {
+        return;
+      }
+      await this.db
+        .prepare("UPDATE contacts SET is_stale = 1 WHERE account_id = ? AND is_self = 0")
+        .run(accountId);
+      this.options.logger?.debug({ accountId }, "marked all contacts stale");
+    });
   }
 
-  listContacts(kind?: ContactKind, limit = 50): ContactRecord[] {
+  async listContacts(kind?: ContactKind, limit = 50): Promise<ContactRecord[]> {
     const accountId = this.currentAccountId();
     if (!accountId) {
       return [];
     }
     const scanLimit = Math.max(limit * 3, limit);
     const rows = kind
-      ? (this.db
+      ? (await this.db
           .prepare(
             "SELECT * FROM contacts WHERE account_id = ? AND kind = ? AND is_self = 0 AND is_stale = 0 ORDER BY display_name COLLATE NOCASE LIMIT ?"
           )
           .all(accountId, kind, scanLimit) as unknown as ContactRow[])
-      : (this.db
+      : (await this.db
           .prepare("SELECT * FROM contacts WHERE account_id = ? AND is_self = 0 AND is_stale = 0 ORDER BY display_name COLLATE NOCASE LIMIT ?")
           .all(accountId, scanLimit) as unknown as ContactRow[]);
     const contacts = dedupeContactsByProtocol(rows.map(asContact)).slice(0, limit);
@@ -459,7 +536,7 @@ export class SqliteStore implements MessageStore {
     return contacts;
   }
 
-  findContactByName(query: string): ContactRecord | undefined {
+  async findContactByName(query: string): Promise<ContactRecord | undefined> {
     const accountId = this.currentAccountId();
     if (!accountId) {
       return undefined;
@@ -469,7 +546,7 @@ export class SqliteStore implements MessageStore {
       return undefined;
     }
     const like = `%${normalized}%`;
-    const row = this.db
+    const row = await this.db
       .prepare(
         "SELECT * FROM contacts WHERE is_self = 0 AND is_stale = 0 AND " +
           "account_id = ? AND " +
@@ -485,7 +562,7 @@ export class SqliteStore implements MessageStore {
     let contact = row ? asContact(row) : undefined;
     const normalizedGroupName = normalizeComparableGroupName(query);
     if (!contact && normalizedGroupName) {
-      const groupRows = this.db
+      const groupRows = await this.db
         .prepare(
           "SELECT * FROM contacts WHERE account_id = ? AND is_self = 0 AND is_stale = 0 AND kind = 'group' ORDER BY updated_at DESC"
         )
@@ -496,7 +573,7 @@ export class SqliteStore implements MessageStore {
     return contact;
   }
 
-  searchContacts(keyword: string, limit = 20): ContactRecord[] {
+  async searchContacts(keyword: string, limit = 20): Promise<ContactRecord[]> {
     const accountId = this.currentAccountId();
     if (!accountId) {
       return [];
@@ -504,7 +581,7 @@ export class SqliteStore implements MessageStore {
     const scanLimit = Math.max(limit * 3, limit);
     const normalized = keyword.trim().toLowerCase();
     const rows = normalized
-      ? (this.db
+      ? (await this.db
           .prepare(
             "SELECT * FROM contacts WHERE account_id = ? AND is_self = 0 AND is_stale = 0 AND kind IN ('private', 'group') AND " +
               "(lower(display_name) LIKE ? OR lower(remark_name) LIKE ? OR lower(nick_name) LIKE ? OR lower(alias) LIKE ?) " +
@@ -525,7 +602,7 @@ export class SqliteStore implements MessageStore {
             normalized,
             scanLimit
           ) as unknown as ContactRow[])
-      : (this.db
+      : (await this.db
           .prepare(
             "SELECT * FROM contacts WHERE account_id = ? AND is_self = 0 AND is_stale = 0 AND kind IN ('private', 'group') ORDER BY updated_at DESC, display_name COLLATE NOCASE LIMIT ?"
           )
@@ -535,89 +612,93 @@ export class SqliteStore implements MessageStore {
     return contacts;
   }
 
-  upsertConversation(conversation: ConversationInput): ConversationRecord {
-    const accountId = this.requireActiveAccountId("upsert conversation");
-    this.options.logger?.trace({ conversation: summarizeConversationInput(conversation) }, "upserting conversation");
-    const now = Date.now();
-    const existing = this.findConversationById(conversation.id);
-    const conversationForStorage = stabilizeConversationForUpsert(conversation, existing);
-    this.db
-      .prepare(
-        "INSERT INTO conversations (account_id, id, protocol_id, kind, title, unread_count, updated_at) VALUES (?, ?, ?, ?, ?, 0, ?) " +
-          "ON CONFLICT(id) DO UPDATE SET account_id = excluded.account_id, protocol_id = excluded.protocol_id, kind = excluded.kind, " +
-          "title = excluded.title, updated_at = excluded.updated_at"
-      )
-      .run(
-        accountId,
-        conversationForStorage.id,
-        conversationForStorage.protocolId ?? null,
-        conversationForStorage.kind,
-        conversationForStorage.title,
-        now
-      );
+  async upsertConversation(conversation: ConversationInput): Promise<ConversationRecord> {
+    return this.enqueueWrite(async () => {
+      const accountId = this.requireActiveAccountId("upsert conversation");
+      this.options.logger?.trace({ conversation: summarizeConversationInput(conversation) }, "upserting conversation");
+      const now = Date.now();
+      const existing = await this.findConversationById(conversation.id);
+      const conversationForStorage = stabilizeConversationForUpsert(conversation, existing);
+      await this.db
+        .prepare(
+          "INSERT INTO conversations (account_id, id, protocol_id, kind, title, unread_count, updated_at) VALUES (?, ?, ?, ?, ?, 0, ?) " +
+            "ON CONFLICT(id) DO UPDATE SET account_id = excluded.account_id, protocol_id = excluded.protocol_id, kind = excluded.kind, " +
+            "title = excluded.title, updated_at = excluded.updated_at"
+        )
+        .run(
+          accountId,
+          conversationForStorage.id,
+          conversationForStorage.protocolId ?? null,
+          conversationForStorage.kind,
+          conversationForStorage.title,
+          now
+        );
 
-    const saved = this.findConversationById(conversation.id);
-    if (!saved) {
-      throw new Error(`Failed to save conversation ${conversation.id}`);
-    }
-    this.options.logger?.trace(
-      {
-        id: saved.id,
-        protocolId: saved.protocolId,
-        title: saved.title,
-        unreadCount: saved.unreadCount
-      },
-      "conversation upserted"
-    );
-    return saved;
+      const saved = await this.findConversationById(conversation.id);
+      if (!saved) {
+        throw new Error(`Failed to save conversation ${conversation.id}`);
+      }
+      this.options.logger?.trace(
+        {
+          id: saved.id,
+          protocolId: saved.protocolId,
+          title: saved.title,
+          unreadCount: saved.unreadCount
+        },
+        "conversation upserted"
+      );
+      return saved;
+    });
   }
 
-  mergeStaleConversationForContact(contact: ContactRecord, conversation: ConversationRecord): ConversationRecord {
-    const accountId = this.currentAccountId();
-    if (!accountId || !isMergeableContactKind(contact.kind) || contact.isSelf) {
-      return conversation;
-    }
+  async mergeStaleConversationForContact(contact: ContactRecord, conversation: ConversationRecord): Promise<ConversationRecord> {
+    return this.enqueueWrite(async () => {
+      const accountId = this.currentAccountId();
+      if (!accountId || !isMergeableContactKind(contact.kind) || contact.isSelf) {
+        return conversation;
+      }
 
-    const activeMatches = this.findLazyMergeActiveContacts(accountId, contact);
-    if (activeMatches.length !== 1 || activeMatches[0]?.id !== contact.id) {
-      this.options.logger?.debug(
-        { contactId: contact.id, displayName: contact.displayName, activeMatches: activeMatches.length },
-        "skipping stale conversation merge because current contact is ambiguous"
+      const activeMatches = await this.findLazyMergeActiveContacts(accountId, contact);
+      if (activeMatches.length !== 1 || activeMatches[0]?.id !== contact.id) {
+        this.options.logger?.debug(
+          { contactId: contact.id, displayName: contact.displayName, activeMatches: activeMatches.length },
+          "skipping stale conversation merge because current contact is ambiguous"
+        );
+        return conversation;
+      }
+
+      const staleContacts = await this.findLazyMergeStaleContacts(accountId, contact);
+      if (staleContacts.length === 0) {
+        return conversation;
+      }
+
+      const staleConversations = await this.findLazyMergeStaleConversations(accountId, contact, conversation, staleContacts);
+      if (staleConversations.length === 0) {
+        return conversation;
+      }
+
+      await this.applyStaleConversationMerge(accountId, contact, conversation, staleContacts, staleConversations);
+
+      const merged = (await this.findConversationById(conversation.id)) ?? conversation;
+      this.options.logger?.info(
+        {
+          contactId: contact.id,
+          conversationId: conversation.id,
+          staleContactIds: staleContacts.map((staleContact) => staleContact.id),
+          staleConversationIds: staleConversations.map((staleConversation) => staleConversation.id)
+        },
+        "merged stale conversations into current contact conversation"
       );
-      return conversation;
-    }
-
-    const staleContacts = this.findLazyMergeStaleContacts(accountId, contact);
-    if (staleContacts.length === 0) {
-      return conversation;
-    }
-
-    const staleConversations = this.findLazyMergeStaleConversations(accountId, contact, conversation, staleContacts);
-    if (staleConversations.length === 0) {
-      return conversation;
-    }
-
-    this.applyStaleConversationMerge(accountId, contact, conversation, staleContacts, staleConversations);
-
-    const merged = this.findConversationById(conversation.id) ?? conversation;
-    this.options.logger?.info(
-      {
-        contactId: contact.id,
-        conversationId: conversation.id,
-        staleContactIds: staleContacts.map((staleContact) => staleContact.id),
-        staleConversationIds: staleConversations.map((staleConversation) => staleConversation.id)
-      },
-      "merged stale conversations into current contact conversation"
-    );
-    return merged;
+      return merged;
+    });
   }
 
-  findConversationById(id: string): ConversationRecord | undefined {
+  async findConversationById(id: string): Promise<ConversationRecord | undefined> {
     const accountId = this.currentAccountId();
     if (!accountId) {
       return undefined;
     }
-    const row = this.db.prepare("SELECT * FROM conversations WHERE account_id = ? AND id = ?").get(accountId, id) as
+    const row = await this.db.prepare("SELECT * FROM conversations WHERE account_id = ? AND id = ?").get(accountId, id) as
       | ConversationRow
       | undefined;
     const conversation = row ? asConversation(row) : undefined;
@@ -625,150 +706,152 @@ export class SqliteStore implements MessageStore {
     return conversation;
   }
 
-  hasMessage(messageId: string): boolean {
+  async hasMessage(messageId: string): Promise<boolean> {
     const accountId = this.currentAccountId();
     if (!accountId) {
       return false;
     }
-    const row = this.db.prepare("SELECT 1 FROM messages WHERE account_id = ? AND id = ? LIMIT 1").get(accountId, messageId);
+    const row = await this.db.prepare("SELECT 1 FROM messages WHERE account_id = ? AND id = ? LIMIT 1").get(accountId, messageId);
     return !!row;
   }
 
-  saveMessage(message: MessageInput, conversation: ConversationInput, incrementUnread: boolean): MessageRecord {
-    const unreadIncrement = conversation.kind === "public" ? 0 : incrementUnread ? 1 : 0;
-    const accountId = this.requireActiveAccountId("save message");
-    this.options.logger?.debug(
-      {
-        message: summarizeMessageInput(message),
-        conversation: summarizeConversationInput(conversation),
-        incrementUnread: unreadIncrement > 0
-      },
-      "saving message"
-    );
-    let inserted = false;
-    this.db.exec("BEGIN");
-    try {
-      this.upsertConversation(conversation);
-      const now = Date.now();
-      const senderKind = message.senderKind ?? (message.isSelf ? "self" : "contact");
-      const insertResult = this.db
-        .prepare(
-          "INSERT OR IGNORE INTO messages " +
-            "(account_id, id, conversation_id, protocol_message_id, sender_id, sender_kind, sender_protocol_id, " +
-            "sender_name, is_self, content, type, timestamp, raw_json, created_at) " +
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-        )
-        .run(
-          accountId,
-          message.id,
-          message.conversationId,
-          message.protocolMessageId ?? null,
-          message.senderId ?? null,
-          senderKind,
-          message.senderProtocolId ?? null,
-          message.senderName,
-          message.isSelf ? 1 : 0,
-          message.content,
-          message.type,
-          message.timestamp,
-          jsonString(message.raw),
-          now
-        );
-
-      if (Number(insertResult.changes) > 0) {
-        inserted = true;
-        this.db
+  async saveMessage(message: MessageInput, conversation: ConversationInput, incrementUnread: boolean): Promise<MessageRecord> {
+    return this.enqueueWrite(async () => {
+      const unreadIncrement = conversation.kind === "public" ? 0 : incrementUnread ? 1 : 0;
+      const accountId = this.requireActiveAccountId("save message");
+      this.options.logger?.debug(
+        {
+          message: summarizeMessageInput(message),
+          conversation: summarizeConversationInput(conversation),
+          incrementUnread: unreadIncrement > 0
+        },
+        "saving message"
+      );
+      let inserted = false;
+      await this.db.exec("BEGIN");
+      try {
+        await this.upsertConversation(conversation);
+        const now = Date.now();
+        const senderKind = message.senderKind ?? (message.isSelf ? "self" : "contact");
+        const insertResult = await this.db
           .prepare(
-            "UPDATE conversations SET last_message_preview = ?, last_message_at = ?, " +
-              "last_message_sender_name = ?, last_message_is_self = ?, " +
-              "unread_count = unread_count + ?, updated_at = ? WHERE account_id = ? AND id = ?"
+            "INSERT OR IGNORE INTO messages " +
+              "(account_id, id, conversation_id, protocol_message_id, sender_id, sender_kind, sender_protocol_id, " +
+              "sender_name, is_self, content, type, timestamp, raw_json, created_at) " +
+              "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
           )
           .run(
-            message.content,
-            message.timestamp,
+            accountId,
+            message.id,
+            message.conversationId,
+            message.protocolMessageId ?? null,
+            message.senderId ?? null,
+            senderKind,
+            message.senderProtocolId ?? null,
             message.senderName,
             message.isSelf ? 1 : 0,
-            unreadIncrement,
-            now,
-            accountId,
-            conversation.id
+            message.content,
+            message.type,
+            message.timestamp,
+            jsonString(message.raw),
+            now
           );
+
+        if (Number(insertResult.changes) > 0) {
+          inserted = true;
+          await this.db
+            .prepare(
+              "UPDATE conversations SET last_message_preview = ?, last_message_at = ?, " +
+                "last_message_sender_name = ?, last_message_is_self = ?, " +
+                "unread_count = unread_count + ?, updated_at = ? WHERE account_id = ? AND id = ?"
+            )
+            .run(
+              message.content,
+              message.timestamp,
+              message.senderName,
+              message.isSelf ? 1 : 0,
+              unreadIncrement,
+              now,
+              accountId,
+              conversation.id
+            );
+        }
+
+        await this.db.exec("COMMIT");
+      } catch (error) {
+        await this.db.exec("ROLLBACK");
+        this.options.logger?.error(
+          {
+            err: error,
+            message: summarizeMessageInput(message),
+            conversation: summarizeConversationInput(conversation)
+          },
+          "failed to save message"
+        );
+        throw error;
       }
 
-      this.db.exec("COMMIT");
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      this.options.logger?.error(
+      const saved = await this.findMessageById(message.id);
+      if (!saved) {
+        throw new Error(`Failed to save message ${message.id}`);
+      }
+      this.options.logger?.debug(
         {
-          err: error,
-          message: summarizeMessageInput(message),
-          conversation: summarizeConversationInput(conversation)
+          inserted,
+          incrementUnread: unreadIncrement > 0,
+          message: summarizeStoredMessage(saved)
         },
-        "failed to save message"
+        inserted ? "message saved" : "duplicate message ignored"
       );
-      throw error;
-    }
-
-    const saved = this.findMessageById(message.id);
-    if (!saved) {
-      throw new Error(`Failed to save message ${message.id}`);
-    }
-    this.options.logger?.debug(
-      {
-        inserted,
-        incrementUnread: unreadIncrement > 0,
-        message: summarizeStoredMessage(saved)
-      },
-      inserted ? "message saved" : "duplicate message ignored"
-    );
-    return saved;
+      return saved;
+    });
   }
 
-  listRecentConversations(limit = 20): ConversationRecord[] {
+  async listRecentConversations(limit = 20): Promise<ConversationRecord[]> {
     const accountId = this.currentAccountId();
     if (!accountId) {
       return [];
     }
     const scanLimit = Math.max(limit * 3, limit);
-    const rows = this.db
+    const rows = await this.db
       .prepare(
         "SELECT * FROM conversations WHERE account_id = ? ORDER BY last_message_at IS NULL ASC, last_message_at DESC, updated_at DESC LIMIT ?"
       )
       .all(accountId, scanLimit) as unknown as ConversationRow[];
-    const conversations = this.foldMergeableConversationsByActiveContacts(
+    const conversations = (await this.foldMergeableConversationsByActiveContacts(
       accountId,
       dedupeConversationsByProtocol(rows.map(asConversation))
-    ).slice(0, limit);
+    )).slice(0, limit);
     this.options.logger?.debug({ limit, count: conversations.length }, "listed recent conversations");
     return conversations;
   }
 
-  listUnreadConversations(limit = 20): ConversationRecord[] {
+  async listUnreadConversations(limit = 20): Promise<ConversationRecord[]> {
     const accountId = this.currentAccountId();
     if (!accountId) {
       return [];
     }
     const scanLimit = Math.max(limit * 3, limit);
-    const rows = this.db
+    const rows = await this.db
       .prepare(
         "SELECT * FROM conversations WHERE account_id = ? AND kind <> 'public' AND unread_count > 0 " +
           "ORDER BY last_message_at DESC, updated_at DESC LIMIT ?"
       )
       .all(accountId, scanLimit) as unknown as ConversationRow[];
-    const conversations = this.foldMergeableConversationsByActiveContacts(
+    const conversations = (await this.foldMergeableConversationsByActiveContacts(
       accountId,
       dedupeConversationsByProtocol(rows.map(asConversation))
-    ).slice(0, limit);
+    )).slice(0, limit);
     this.options.logger?.debug({ limit, count: conversations.length }, "listed unread conversations");
     return conversations;
   }
 
-  listMessages(conversationId: string, limit = 30): MessageRecord[] {
+  async listMessages(conversationId: string, limit = 30): Promise<MessageRecord[]> {
     const accountId = this.currentAccountId();
     if (!accountId) {
       return [];
     }
-    const rows = this.db
+    const rows = await this.db
       .prepare(
         "SELECT * FROM messages WHERE account_id = ? AND conversation_id = ? ORDER BY timestamp DESC, created_at DESC LIMIT ?"
       )
@@ -778,17 +861,19 @@ export class SqliteStore implements MessageStore {
     return messages;
   }
 
-  updateMessageRaw(messageId: string, raw: unknown): void {
-    const accountId = this.currentAccountId();
-    if (!accountId) {
-      return;
-    }
-    this.db
-      .prepare("UPDATE messages SET raw_json = ? WHERE account_id = ? AND id = ?")
-      .run(jsonString(raw), accountId, messageId);
+  async updateMessageRaw(messageId: string, raw: unknown): Promise<void> {
+    return this.enqueueWrite(async () => {
+      const accountId = this.currentAccountId();
+      if (!accountId) {
+        return;
+      }
+      await this.db
+        .prepare("UPDATE messages SET raw_json = ? WHERE account_id = ? AND id = ?")
+        .run(jsonString(raw), accountId, messageId);
+    });
   }
 
-  searchMessages(keyword: string, limit = 50, conversationId?: string): SearchResult[] {
+  async searchMessages(keyword: string, limit = 50, conversationId?: string): Promise<SearchResult[]> {
     const accountId = this.currentAccountId();
     if (!accountId) {
       return [];
@@ -799,23 +884,23 @@ export class SqliteStore implements MessageStore {
     }
     const like = `%${normalized}%`;
     const rows = conversationId
-      ? (this.db
+      ? (await this.db
           .prepare(
             "SELECT * FROM messages WHERE account_id = ? AND conversation_id = ? AND content LIKE ? " +
               "ORDER BY timestamp DESC, created_at DESC LIMIT ?"
           )
           .all(accountId, conversationId, like, limit) as unknown as MessageRow[])
-      : (this.db
+      : (await this.db
           .prepare("SELECT * FROM messages WHERE account_id = ? AND content LIKE ? ORDER BY timestamp DESC, created_at DESC LIMIT ?")
           .all(accountId, like, limit) as unknown as MessageRow[]);
 
-    const results = rows.flatMap((row) => {
-      const conversation = this.findConversationById(row.conversation_id);
-      if (!conversation) {
-        return [];
+    const results: SearchResult[] = [];
+    for (const row of rows) {
+      const conversation = await this.findConversationById(row.conversation_id);
+      if (conversation) {
+        results.push({ conversation, message: asMessage(row) });
       }
-      return [{ conversation, message: asMessage(row) }];
-    });
+    }
     this.options.logger?.debug(
       {
         keyword,
@@ -828,27 +913,31 @@ export class SqliteStore implements MessageStore {
     return results;
   }
 
-  markRead(conversationId: string): void {
-    const accountId = this.currentAccountId();
-    if (!accountId) {
-      return;
-    }
-    const conversation = this.findConversationById(conversationId);
-    const conversationIds = conversation ? this.findFoldedConversationIds(accountId, conversation) : [conversationId];
-    const now = Date.now();
-    const statement = this.db.prepare("UPDATE conversations SET unread_count = 0, updated_at = ? WHERE account_id = ? AND id = ?");
-    for (const id of conversationIds) {
-      statement.run(now, accountId, id);
-    }
-    this.options.logger?.debug({ conversationId, conversationIds }, "marked conversation read");
+  async markRead(conversationId: string): Promise<void> {
+    return this.enqueueWrite(async () => {
+      const accountId = this.currentAccountId();
+      if (!accountId) {
+        return;
+      }
+      const conversation = await this.findConversationById(conversationId);
+      const conversationIds = conversation ? await this.findFoldedConversationIds(accountId, conversation) : [conversationId];
+      const now = Date.now();
+      const statement = await this.db.prepare(
+        "UPDATE conversations SET unread_count = 0, updated_at = ? WHERE account_id = ? AND id = ?"
+      );
+      for (const id of conversationIds) {
+        await statement.run(now, accountId, id);
+      }
+      this.options.logger?.debug({ conversationId, conversationIds }, "marked conversation read");
+    });
   }
 
-  totalUnreadCount(): number {
+  async totalUnreadCount(): Promise<number> {
     const accountId = this.currentAccountId();
     if (!accountId) {
       return 0;
     }
-    const row = this.db
+    const row = await this.db
       .prepare("SELECT COALESCE(SUM(unread_count), 0) AS total FROM conversations WHERE account_id = ? AND kind <> 'public'")
       .get(accountId) as { total: number } | undefined;
     const total = Number(row?.total ?? 0);
@@ -856,40 +945,40 @@ export class SqliteStore implements MessageStore {
     return total;
   }
 
-  private findContactById(id: string): ContactRecord | undefined {
+  private async findContactById(id: string): Promise<ContactRecord | undefined> {
     const accountId = this.currentAccountId();
     if (!accountId) {
       return undefined;
     }
-    const row = this.db.prepare("SELECT * FROM contacts WHERE account_id = ? AND id = ?").get(accountId, id) as
+    const row = await this.db.prepare("SELECT * FROM contacts WHERE account_id = ? AND id = ?").get(accountId, id) as
       | ContactRow
       | undefined;
     return row ? asContact(row) : undefined;
   }
 
-  private findGroupMemberById(id: string): GroupMemberRecord | undefined {
+  private async findGroupMemberById(id: string): Promise<GroupMemberRecord | undefined> {
     const accountId = this.currentAccountId();
     if (!accountId) {
       return undefined;
     }
-    const row = this.db.prepare("SELECT * FROM group_members WHERE account_id = ? AND id = ?").get(accountId, id) as
+    const row = await this.db.prepare("SELECT * FROM group_members WHERE account_id = ? AND id = ?").get(accountId, id) as
       | GroupMemberRow
       | undefined;
     return row ? asGroupMember(row) : undefined;
   }
 
-  private findMessageById(id: string): MessageRecord | undefined {
+  private async findMessageById(id: string): Promise<MessageRecord | undefined> {
     const accountId = this.currentAccountId();
     if (!accountId) {
       return undefined;
     }
-    const row = this.db.prepare("SELECT * FROM messages WHERE account_id = ? AND id = ?").get(accountId, id) as
+    const row = await this.db.prepare("SELECT * FROM messages WHERE account_id = ? AND id = ?").get(accountId, id) as
       | MessageRow
       | undefined;
     return row ? asMessage(row) : undefined;
   }
 
-  private backfillConversationTitlesFromContact(contact: ContactRecord): void {
+  private async backfillConversationTitlesFromContact(contact: ContactRecord): Promise<void> {
     const accountId = this.currentAccountId();
     if (!accountId || !contact.protocolId) {
       return;
@@ -898,7 +987,7 @@ export class SqliteStore implements MessageStore {
 
     // Update the conversation's protocol_id to the latest UserName (by stable conversation ID)
     const conversationId = `conversation:${contact.id}`;
-    this.db
+    await this.db
       .prepare(
         "UPDATE conversations SET protocol_id = ?, updated_at = ? WHERE account_id = ? AND id = ?"
       )
@@ -906,7 +995,7 @@ export class SqliteStore implements MessageStore {
 
     // Update titles for conversations matching this protocol_id with unhelpful names
     if (isUsefulSenderName(contact.displayName)) {
-      this.db
+      await this.db
         .prepare(
           "UPDATE conversations SET title = ?, updated_at = ? " +
             `WHERE account_id = ? AND protocol_id = ? AND ${unhelpfulNameSql("title")}`
@@ -915,7 +1004,7 @@ export class SqliteStore implements MessageStore {
     }
   }
 
-  private backfillSenderNameFromContact(contact: ContactRecord): void {
+  private async backfillSenderNameFromContact(contact: ContactRecord): Promise<void> {
     const accountId = this.currentAccountId();
     if (!accountId) {
       return;
@@ -925,14 +1014,14 @@ export class SqliteStore implements MessageStore {
     }
 
     const senderIdsSql = senderIdsForContactSql();
-    const result = this.db
+    const result = await this.db
       .prepare(
         `UPDATE messages SET sender_name = ? WHERE account_id = ? AND sender_id IN (${senderIdsSql}) ` +
           `AND ${unhelpfulNameSql("sender_name")}`
       )
       .run(contact.displayName, accountId, contact.id, accountId, contact.protocolId ?? null);
 
-    this.db
+    await this.db
       .prepare(
         "UPDATE conversations SET last_message_sender_name = ? WHERE account_id = ? " +
           `AND ${unhelpfulNameSql("last_message_sender_name")} ` +
@@ -956,7 +1045,7 @@ export class SqliteStore implements MessageStore {
     }
   }
 
-  private backfillSenderNameFromGroupMember(member: GroupMemberRecord, previousDisplayName?: string): void {
+  private async backfillSenderNameFromGroupMember(member: GroupMemberRecord, previousDisplayName?: string): Promise<void> {
     const accountId = this.currentAccountId();
     if (!accountId || !isUsefulSenderName(member.displayName)) {
       return;
@@ -968,7 +1057,7 @@ export class SqliteStore implements MessageStore {
     const messageNameSql = nameBackfillSql("sender_name", previousName);
     const previewNameSql = nameBackfillSql("last_message_sender_name", previousName);
     const previousNameParams = previousName ? [previousName] : [];
-    const result = this.db
+    const result = await this.db
       .prepare(
         "UPDATE messages SET sender_name = ? WHERE account_id = ? " +
           `AND ${messageNameSql} ` +
@@ -988,7 +1077,7 @@ export class SqliteStore implements MessageStore {
         member.memberProtocolId
       );
 
-    this.db
+    await this.db
       .prepare(
         "UPDATE conversations SET last_message_sender_name = ? WHERE account_id = ? " +
           `AND ${previewNameSql} ` +
@@ -1028,12 +1117,12 @@ export class SqliteStore implements MessageStore {
     }
   }
 
-  private backfillMissingGroupMemberSenderProtocol(member: GroupMemberRecord): number {
+  private async backfillMissingGroupMemberSenderProtocol(member: GroupMemberRecord): Promise<number> {
     const accountId = this.currentAccountId();
     if (!accountId) {
       return 0;
     }
-    const result = this.db
+    const result = await this.db
       .prepare(
         "UPDATE messages SET sender_kind = 'group-member', sender_protocol_id = ?, sender_id = ? " +
           "WHERE account_id = ? " +
@@ -1053,7 +1142,7 @@ export class SqliteStore implements MessageStore {
     return Number(result.changes);
   }
 
-  private backfillGroupMemberSenderNamesFromContact(contact: ContactRecord): void {
+  private async backfillGroupMemberSenderNamesFromContact(contact: ContactRecord): Promise<void> {
     const accountId = this.currentAccountId();
     if (!accountId || contact.kind !== "group" || !contact.protocolId) {
       return;
@@ -1066,8 +1155,8 @@ export class SqliteStore implements MessageStore {
 
     let changedMessages = 0;
     for (const member of members) {
-      const saved = this.upsertGroupMember(member);
-      changedMessages += this.backfillMissingGroupMemberSenderProtocol(saved);
+      const saved = await this.upsertGroupMember(member);
+      changedMessages += await this.backfillMissingGroupMemberSenderProtocol(saved);
     }
 
     if (changedMessages > 0) {
@@ -1082,18 +1171,18 @@ export class SqliteStore implements MessageStore {
     }
   }
 
-  private foldMergeableConversationsByActiveContacts(
+  private async foldMergeableConversationsByActiveContacts(
     accountId: string,
     conversations: ConversationRecord[]
-  ): ConversationRecord[] {
-    const activeContacts = this.listActiveMergeableContacts(accountId);
+  ): Promise<ConversationRecord[]> {
+    const activeContacts = await this.listActiveMergeableContacts(accountId);
     if (activeContacts.length === 0) {
       return conversations;
     }
 
     const buckets = new Map<string, { contact?: ContactRecord; conversations: ConversationRecord[] }>();
     for (const conversation of conversations) {
-      const contact = this.uniqueActiveContactForConversation(accountId, activeContacts, conversation);
+      const contact = await this.uniqueActiveContactForConversation(accountId, activeContacts, conversation);
       const key = contact ? `contact:${contact.id}` : conversation.protocolId ? `${conversation.kind}:${conversation.protocolId}` : conversation.id;
       const bucket = buckets.get(key);
       if (bucket) {
@@ -1108,25 +1197,27 @@ export class SqliteStore implements MessageStore {
       .sort(compareRecentConversations);
   }
 
-  private findFoldedConversationIds(accountId: string, conversation: ConversationRecord): string[] {
-    const activeContacts = this.listActiveMergeableContacts(accountId);
-    const contact = this.uniqueActiveContactForConversation(accountId, activeContacts, conversation);
+  private async findFoldedConversationIds(accountId: string, conversation: ConversationRecord): Promise<string[]> {
+    const activeContacts = await this.listActiveMergeableContacts(accountId);
+    const contact = await this.uniqueActiveContactForConversation(accountId, activeContacts, conversation);
     if (!contact) {
       return [conversation.id];
     }
 
-    const rows = this.db
+    const rows = await this.db
       .prepare("SELECT * FROM conversations WHERE account_id = ? AND kind = ?")
       .all(accountId, conversation.kind) as unknown as ConversationRow[];
-    const ids = rows
-      .map(asConversation)
-      .filter((candidate) => this.contactCanFoldConversation(accountId, contact, candidate))
-      .map((candidate) => candidate.id);
+    const ids: string[] = [];
+    for (const candidate of rows.map(asConversation)) {
+      if (await this.contactCanFoldConversation(accountId, contact, candidate)) {
+        ids.push(candidate.id);
+      }
+    }
     return ids.length > 0 ? ids : [conversation.id];
   }
 
-  private listActiveMergeableContacts(accountId: string): ContactRecord[] {
-    const rows = this.db
+  private async listActiveMergeableContacts(accountId: string): Promise<ContactRecord[]> {
+    const rows = await this.db
       .prepare(
         "SELECT * FROM contacts WHERE account_id = ? AND is_self = 0 AND is_stale = 0 AND kind IN ('private', 'group')"
       )
@@ -1134,23 +1225,28 @@ export class SqliteStore implements MessageStore {
     return rows.map(asContact);
   }
 
-  private uniqueActiveContactForConversation(
+  private async uniqueActiveContactForConversation(
     accountId: string,
     activeContacts: ContactRecord[],
     conversation: ConversationRecord
-  ): ContactRecord | undefined {
+  ): Promise<ContactRecord | undefined> {
     if (!isMergeableContactKind(conversation.kind)) {
       return undefined;
     }
-    const matches = activeContacts.filter((contact) => this.contactCanFoldConversation(accountId, contact, conversation));
+    const matches: ContactRecord[] = [];
+    for (const contact of activeContacts) {
+      if (await this.contactCanFoldConversation(accountId, contact, conversation)) {
+        matches.push(contact);
+      }
+    }
     return matches.length === 1 ? matches[0] : undefined;
   }
 
-  private contactCanFoldConversation(
+  private async contactCanFoldConversation(
     accountId: string,
     contact: ContactRecord,
     conversation: ConversationRecord
-  ): boolean {
+  ): Promise<boolean> {
     if (!contactMatchesConversation(contact, conversation)) {
       return false;
     }
@@ -1160,29 +1256,29 @@ export class SqliteStore implements MessageStore {
     if (!conversation.protocolId) {
       return false;
     }
-    const staleContact = this.findStaleContactByProtocolId(accountId, conversation.kind, conversation.protocolId);
+    const staleContact = await this.findStaleContactByProtocolId(accountId, conversation.kind, conversation.protocolId);
     return !!staleContact && sameLazyMergeContact(contact, staleContact);
   }
 
-  private findStaleContactByProtocolId(
+  private async findStaleContactByProtocolId(
     accountId: string,
     kind: ContactKind,
     protocolId: string
-  ): ContactRecord | undefined {
-    const row = this.db
+  ): Promise<ContactRecord | undefined> {
+    const row = await this.db
       .prepare("SELECT * FROM contacts WHERE account_id = ? AND is_stale = 1 AND kind = ? AND protocol_id = ? LIMIT 1")
       .get(accountId, kind, protocolId) as ContactRow | undefined;
     return row ? asContact(row) : undefined;
   }
 
-  private findLazyMergeActiveContacts(accountId: string, contact: ContactRecord): ContactRecord[] {
-    return this.findLazyMergeCandidateContacts(accountId, contact, false).filter((candidate) =>
-      sameLazyMergeContact(candidate, contact)
-    );
+  private async findLazyMergeActiveContacts(accountId: string, contact: ContactRecord): Promise<ContactRecord[]> {
+    const candidates = await this.findLazyMergeCandidateContacts(accountId, contact, false);
+    return candidates.filter((candidate) => sameLazyMergeContact(candidate, contact));
   }
 
-  private findLazyMergeStaleContacts(accountId: string, contact: ContactRecord): ContactRecord[] {
-    return this.findLazyMergeCandidateContacts(accountId, contact, true).filter(
+  private async findLazyMergeStaleContacts(accountId: string, contact: ContactRecord): Promise<ContactRecord[]> {
+    const candidates = await this.findLazyMergeCandidateContacts(accountId, contact, true);
+    return candidates.filter(
       (candidate) =>
         candidate.id !== contact.id &&
         !!candidate.protocolId &&
@@ -1191,14 +1287,14 @@ export class SqliteStore implements MessageStore {
     );
   }
 
-  private findLazyMergeCandidateContacts(accountId: string, contact: ContactRecord, stale: boolean): ContactRecord[] {
+  private async findLazyMergeCandidateContacts(accountId: string, contact: ContactRecord, stale: boolean): Promise<ContactRecord[]> {
     const staleValue = stale ? 1 : 0;
     const rows =
       contact.kind === "group"
-        ? (this.db
+        ? (await this.db
             .prepare("SELECT * FROM contacts WHERE account_id = ? AND is_self = 0 AND is_stale = ? AND kind = ?")
             .all(accountId, staleValue, contact.kind) as unknown as ContactRow[])
-        : (this.db
+        : (await this.db
             .prepare(
               "SELECT * FROM contacts WHERE account_id = ? AND is_self = 0 AND is_stale = ? AND kind = ? AND display_name = ?"
             )
@@ -1206,14 +1302,14 @@ export class SqliteStore implements MessageStore {
     return rows.map(asContact);
   }
 
-  private findLazyMergeStaleConversations(
+  private async findLazyMergeStaleConversations(
     accountId: string,
     contact: ContactRecord,
     conversation: ConversationRecord,
     staleContacts: ContactRecord[]
-  ): ConversationRecord[] {
+  ): Promise<ConversationRecord[]> {
     const staleConversationById = new Map<string, ConversationRecord>();
-    const statement = this.db.prepare(
+    const statement = await this.db.prepare(
       "SELECT * FROM conversations WHERE account_id = ? AND kind = ? AND protocol_id = ? AND id != ?"
     );
 
@@ -1221,7 +1317,7 @@ export class SqliteStore implements MessageStore {
       if (!staleContact.protocolId) {
         continue;
       }
-      const rows = statement.all(
+      const rows = await statement.all(
         accountId,
         staleContact.kind,
         staleContact.protocolId,
@@ -1238,34 +1334,34 @@ export class SqliteStore implements MessageStore {
     return Array.from(staleConversationById.values());
   }
 
-  private applyStaleConversationMerge(
+  private async applyStaleConversationMerge(
     accountId: string,
     contact: ContactRecord,
     conversation: ConversationRecord,
     staleContacts: ContactRecord[],
     staleConversations: ConversationRecord[]
-  ): void {
+  ): Promise<void> {
     const staleUnreadCount = staleConversations.reduce((total, staleConversation) => total + staleConversation.unreadCount, 0);
     const now = Date.now();
-    this.db.exec("BEGIN");
+    await this.db.exec("BEGIN");
     try {
       for (const staleConversation of staleConversations) {
-        this.db
+        await this.db
           .prepare("UPDATE messages SET conversation_id = ? WHERE account_id = ? AND conversation_id = ?")
           .run(conversation.id, accountId, staleConversation.id);
       }
       for (const staleContact of staleContacts) {
-        this.db
+        await this.db
           .prepare("UPDATE messages SET sender_id = ? WHERE account_id = ? AND conversation_id = ? AND sender_id = ?")
           .run(contact.id, accountId, conversation.id, staleContact.id);
       }
       for (const staleConversation of staleConversations) {
-        this.db.prepare("DELETE FROM conversations WHERE account_id = ? AND id = ?").run(accountId, staleConversation.id);
+        await this.db.prepare("DELETE FROM conversations WHERE account_id = ? AND id = ?").run(accountId, staleConversation.id);
       }
-      this.refreshConversationSummary(accountId, conversation, staleUnreadCount, now);
-      this.db.exec("COMMIT");
+      await this.refreshConversationSummary(accountId, conversation, staleUnreadCount, now);
+      await this.db.exec("COMMIT");
     } catch (error) {
-      this.db.exec("ROLLBACK");
+      await this.db.exec("ROLLBACK");
       this.options.logger?.error(
         {
           err: error,
@@ -1279,20 +1375,20 @@ export class SqliteStore implements MessageStore {
     }
   }
 
-  private refreshConversationSummary(
+  private async refreshConversationSummary(
     accountId: string,
     conversation: ConversationRecord,
     unreadIncrement: number,
     updatedAt: number
-  ): void {
-    const latest = this.db
+  ): Promise<void> {
+    const latest = await this.db
       .prepare(
         "SELECT * FROM messages WHERE account_id = ? AND conversation_id = ? ORDER BY timestamp DESC, created_at DESC LIMIT 1"
       )
       .get(accountId, conversation.id) as MessageRow | undefined;
 
     if (!latest) {
-      this.db
+      await this.db
         .prepare(
           "UPDATE conversations SET protocol_id = ?, kind = ?, title = ?, unread_count = unread_count + ?, updated_at = ? " +
             "WHERE account_id = ? AND id = ?"
@@ -1309,7 +1405,7 @@ export class SqliteStore implements MessageStore {
       return;
     }
 
-    this.db
+    await this.db
       .prepare(
         "UPDATE conversations SET protocol_id = ?, kind = ?, title = ?, unread_count = unread_count + ?, " +
           "last_message_preview = ?, last_message_sender_name = ?, last_message_is_self = ?, last_message_at = ?, updated_at = ? " +
@@ -1341,13 +1437,13 @@ export class SqliteStore implements MessageStore {
     return this.activeAccountId;
   }
 
-  private migrateLegacyGroupMemberSenders(): void {
+  private async migrateLegacyGroupMemberSenders(): Promise<void> {
     const now = Date.now();
-    const groupRows = this.db
+    const groupRows = await this.db
       .prepare("SELECT * FROM contacts WHERE kind = 'group' AND raw_json IS NOT NULL")
       .all() as unknown as ContactRow[];
-    const findGroupMember = this.db.prepare("SELECT * FROM group_members WHERE id = ? LIMIT 1");
-    const insertGroupMember = this.db.prepare(
+    const findGroupMember = await this.db.prepare("SELECT * FROM group_members WHERE id = ? LIMIT 1");
+    const insertGroupMember = await this.db.prepare(
       "INSERT INTO group_members " +
         "(account_id, id, group_id, group_protocol_id, member_protocol_id, display_name, remark_name, nick_name, alias, raw_json, updated_at) " +
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
@@ -1357,14 +1453,14 @@ export class SqliteStore implements MessageStore {
         "remark_name = excluded.remark_name, nick_name = excluded.nick_name, alias = excluded.alias, " +
         "raw_json = excluded.raw_json, updated_at = excluded.updated_at"
     );
-    const insertMigratedGroupMember = (accountId: string | null, member: GroupMemberInput): void => {
-      const existingRow = findGroupMember.get(member.id) as GroupMemberRow | undefined;
+    const insertMigratedGroupMember = async (accountId: string | null, member: GroupMemberInput): Promise<void> => {
+      const existingRow = await findGroupMember.get(member.id) as GroupMemberRow | undefined;
       const existing = existingRow ? asGroupMember(existingRow) : undefined;
-      const memberForStorage = this.enrichGroupMemberFromContact(
+      const memberForStorage = await this.enrichGroupMemberFromContact(
         stabilizeGroupMemberForUpsert(member, existing),
         accountId
       );
-      insertGroupMember.run(
+      await insertGroupMember.run(
         accountId,
         memberForStorage.id,
         memberForStorage.groupId,
@@ -1381,11 +1477,11 @@ export class SqliteStore implements MessageStore {
     for (const row of groupRows) {
       const group = asContact(row);
       for (const member of groupMemberInputsFromContact(group, row.account_id)) {
-        insertMigratedGroupMember(row.account_id, member);
+        await insertMigratedGroupMember(row.account_id, member);
       }
     }
 
-    this.db.exec(`
+    await this.db.exec(`
       UPDATE messages
       SET sender_kind = CASE WHEN is_self = 1 THEN 'self' ELSE 'contact' END
       WHERE sender_kind IS NULL;
@@ -1418,7 +1514,7 @@ export class SqliteStore implements MessageStore {
         );
     `);
 
-    const legacyGroupSenders = this.db
+    const legacyGroupSenders = await this.db
       .prepare(
         "SELECT DISTINCT messages.account_id, conversations.id AS group_id, " +
           "conversations.protocol_id AS group_protocol_id, messages.sender_protocol_id AS member_protocol_id, " +
@@ -1431,7 +1527,7 @@ export class SqliteStore implements MessageStore {
       .all() as unknown as LegacyGroupMessageSenderRow[];
     for (const row of legacyGroupSenders) {
       const displayName = firstUsefulGroupMemberName(row.sender_name) ?? "Group member";
-      insertMigratedGroupMember(row.account_id, {
+      await insertMigratedGroupMember(row.account_id, {
         id: groupMemberId(row.group_id, row.member_protocol_id),
         groupId: row.group_id,
         groupProtocolId: row.group_protocol_id ?? undefined,
@@ -1440,7 +1536,7 @@ export class SqliteStore implements MessageStore {
       });
     }
 
-    this.db.exec(`
+    await this.db.exec(`
       UPDATE messages
       SET sender_id = (
         SELECT group_members.id
@@ -1557,9 +1653,9 @@ export class SqliteStore implements MessageStore {
     `);
   }
 
-  private migrate(): void {
+  private async migrate(): Promise<void> {
     this.options.logger?.debug("running sqlite migrations");
-    this.db.exec(`
+    await this.db.exec(`
       PRAGMA journal_mode = WAL;
       PRAGMA foreign_keys = ON;
 
@@ -1652,16 +1748,16 @@ export class SqliteStore implements MessageStore {
         FOREIGN KEY(message_id) REFERENCES messages(id) ON DELETE CASCADE
       );
     `);
-    this.ensureColumn("contacts", "account_id", "TEXT");
-    this.ensureColumn("contacts", "is_stale", "INTEGER DEFAULT 0");
-    this.ensureColumn("conversations", "account_id", "TEXT");
-    this.ensureColumn("conversations", "last_message_sender_name", "TEXT");
-    this.ensureColumn("conversations", "last_message_is_self", "INTEGER");
-    this.ensureColumn("messages", "account_id", "TEXT");
-    this.ensureColumn("messages", "sender_kind", "TEXT");
-    this.ensureColumn("messages", "sender_protocol_id", "TEXT");
-    this.ensureColumn("attachments", "account_id", "TEXT");
-    this.db.exec(`
+    await this.ensureColumn("contacts", "account_id", "TEXT");
+    await this.ensureColumn("contacts", "is_stale", "INTEGER DEFAULT 0");
+    await this.ensureColumn("conversations", "account_id", "TEXT");
+    await this.ensureColumn("conversations", "last_message_sender_name", "TEXT");
+    await this.ensureColumn("conversations", "last_message_is_self", "INTEGER");
+    await this.ensureColumn("messages", "account_id", "TEXT");
+    await this.ensureColumn("messages", "sender_kind", "TEXT");
+    await this.ensureColumn("messages", "sender_protocol_id", "TEXT");
+    await this.ensureColumn("attachments", "account_id", "TEXT");
+    await this.db.exec(`
       CREATE INDEX IF NOT EXISTS idx_contacts_account_display_name ON contacts(account_id, display_name);
       CREATE INDEX IF NOT EXISTS idx_contacts_account_protocol_id ON contacts(account_id, protocol_id);
       CREATE INDEX IF NOT EXISTS idx_group_members_account_group ON group_members(account_id, group_id);
@@ -1679,17 +1775,17 @@ export class SqliteStore implements MessageStore {
       CREATE INDEX IF NOT EXISTS idx_messages_account_content ON messages(account_id, content);
       CREATE INDEX IF NOT EXISTS idx_attachments_account_message_id ON attachments(account_id, message_id);
     `);
-    this.migrateLegacyGroupMemberSenders();
+    await this.migrateLegacyGroupMemberSenders();
     this.options.logger?.debug("sqlite migrations complete");
   }
 
-  private ensureColumn(table: string, column: string, definition: string): void {
-    const rows = this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+  private async ensureColumn(table: string, column: string, definition: string): Promise<void> {
+    const rows = await this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
     if (rows.some((row) => row.name === column)) {
       return;
     }
     this.options.logger?.debug({ table, column }, "adding sqlite column");
-    this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+    await this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
   }
 }
 

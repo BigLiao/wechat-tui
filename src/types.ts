@@ -248,30 +248,30 @@ export interface SearchResult {
 }
 
 export interface MessageStore {
-  close(): void;
-  setActiveAccount(account: UserProfile): void;
+  close(): Promise<void>;
+  setActiveAccount(account: UserProfile): Promise<void>;
   clearActiveAccount(): void;
-  getSessionData(): unknown | undefined;
-  setSessionData(data: unknown): void;
-  clearSessionData(): void;
-  clearData(): void;
-  upsertContact(contact: ContactInput): ContactRecord;
-  upsertContacts(contacts: ContactInput[]): ContactRecord[];
-  upsertGroupMember(member: GroupMemberInput): GroupMemberRecord;
-  markAllContactsStale(): void;
-  listContacts(kind?: ContactKind, limit?: number): ContactRecord[];
-  findContactByName(query: string): ContactRecord | undefined;
-  searchContacts(keyword: string, limit?: number): ContactRecord[];
-  upsertConversation(conversation: ConversationInput): ConversationRecord;
-  mergeStaleConversationForContact(contact: ContactRecord, conversation: ConversationRecord): ConversationRecord;
-  findConversationById(id: string): ConversationRecord | undefined;
-  hasMessage(messageId: string): boolean;
-  saveMessage(message: MessageInput, conversation: ConversationInput, incrementUnread: boolean): MessageRecord;
-  updateMessageRaw(messageId: string, raw: unknown): void;
-  listRecentConversations(limit?: number): ConversationRecord[];
-  listUnreadConversations(limit?: number): ConversationRecord[];
-  listMessages(conversationId: string, limit?: number): MessageRecord[];
-  searchMessages(keyword: string, limit?: number, conversationId?: string): SearchResult[];
-  markRead(conversationId: string): void;
-  totalUnreadCount(): number;
+  getSessionData(): Promise<unknown | undefined>;
+  setSessionData(data: unknown): Promise<void>;
+  clearSessionData(): Promise<void>;
+  clearData(): Promise<void>;
+  upsertContact(contact: ContactInput): Promise<ContactRecord>;
+  upsertContacts(contacts: ContactInput[]): Promise<ContactRecord[]>;
+  upsertGroupMember(member: GroupMemberInput): Promise<GroupMemberRecord>;
+  markAllContactsStale(): Promise<void>;
+  listContacts(kind?: ContactKind, limit?: number): Promise<ContactRecord[]>;
+  findContactByName(query: string): Promise<ContactRecord | undefined>;
+  searchContacts(keyword: string, limit?: number): Promise<ContactRecord[]>;
+  upsertConversation(conversation: ConversationInput): Promise<ConversationRecord>;
+  mergeStaleConversationForContact(contact: ContactRecord, conversation: ConversationRecord): Promise<ConversationRecord>;
+  findConversationById(id: string): Promise<ConversationRecord | undefined>;
+  hasMessage(messageId: string): Promise<boolean>;
+  saveMessage(message: MessageInput, conversation: ConversationInput, incrementUnread: boolean): Promise<MessageRecord>;
+  updateMessageRaw(messageId: string, raw: unknown): Promise<void>;
+  listRecentConversations(limit?: number): Promise<ConversationRecord[]>;
+  listUnreadConversations(limit?: number): Promise<ConversationRecord[]>;
+  listMessages(conversationId: string, limit?: number): Promise<MessageRecord[]>;
+  searchMessages(keyword: string, limit?: number, conversationId?: string): Promise<SearchResult[]>;
+  markRead(conversationId: string): Promise<void>;
+  totalUnreadCount(): Promise<number>;
 }

@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync } from "node:fs";
+import { access, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import type { MessageKind } from "../types.js";
@@ -15,15 +15,19 @@ const CACHE_BASE = join(homedir(), ".wechat-tui", "cache");
 export class MediaCache {
   /**
    * Get the directory for a conversation's cached files.
-   * Creates it if it doesn't exist.
    */
   conversationDir(conversationId: string): string {
     // Sanitize conversation ID for filesystem (replace colons, slashes)
     const safeName = conversationId.replace(/[/:*?"<>|\\]/g, "_");
-    const dir = join(CACHE_BASE, safeName);
-    if (!existsSync(dir)) {
-      mkdirSync(dir, { recursive: true });
-    }
+    return join(CACHE_BASE, safeName);
+  }
+
+  /**
+   * Ensure the directory for a conversation's cached files exists.
+   */
+  async ensureConversationDir(conversationId: string): Promise<string> {
+    const dir = this.conversationDir(conversationId);
+    await mkdir(dir, { recursive: true });
     return dir;
   }
 
@@ -42,10 +46,10 @@ export class MediaCache {
    * Get a file path using the original filename (already sanitized by caller).
    * If a file with the same name exists, appends a counter.
    */
-  filePathByName(conversationId: string, fileName: string): string {
-    const dir = this.conversationDir(conversationId);
+  async filePathByName(conversationId: string, fileName: string): Promise<string> {
+    const dir = await this.ensureConversationDir(conversationId);
     const target = join(dir, fileName);
-    if (!existsSync(target)) {
+    if (!(await fileExists(target))) {
       return target;
     }
     // Deduplicate: file_2.ext, file_3.ext, ...
@@ -54,7 +58,7 @@ export class MediaCache {
     const ext = dot > 0 ? fileName.slice(dot) : "";
     for (let i = 2; i < 1000; i++) {
       const candidate = join(dir, `${base}_${i}${ext}`);
-      if (!existsSync(candidate)) {
+      if (!(await fileExists(candidate))) {
         return candidate;
       }
     }
@@ -64,8 +68,8 @@ export class MediaCache {
   /**
    * Check if a file is already cached.
    */
-  has(conversationId: string, messageId: string, extension: string): boolean {
-    return existsSync(this.filePath(conversationId, messageId, extension));
+  async has(conversationId: string, messageId: string, extension: string): Promise<boolean> {
+    return fileExists(this.filePath(conversationId, messageId, extension));
   }
 
   /**
@@ -73,6 +77,15 @@ export class MediaCache {
    */
   get baseDir(): string {
     return CACHE_BASE;
+  }
+}
+
+async function fileExists(filePath: string): Promise<boolean> {
+  try {
+    await access(filePath);
+    return true;
+  } catch {
+    return false;
   }
 }
 
