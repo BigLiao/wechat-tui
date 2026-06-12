@@ -25,7 +25,10 @@ async function pressText(runtime: WeChatRuntime, value: string): Promise<void> {
 }
 
 async function flushRender(): Promise<void> {
-  await new Promise<void>((resolve) => setImmediate(resolve));
+  for (let i = 0; i < 30; i += 1) {
+    await new Promise<void>((resolve) => setTimeout(resolve, 2));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
 }
 
 class ContactsBeforeLoginProtocol extends EventEmitter implements WeChatProtocol {
@@ -85,6 +88,50 @@ class ContactsBeforeLoginProtocol extends EventEmitter implements WeChatProtocol
       protocolId: this.self.protocolId,
       displayName: this.self.displayName
     };
+  }
+
+  getSessionData(): unknown | undefined {
+    return undefined;
+  }
+}
+
+class LoginThenLogoutProtocol extends EventEmitter implements WeChatProtocol {
+  private readonly self: UserProfile = {
+    id: contactId("self", ["race-user"]),
+    protocolId: "@race-user",
+    displayName: "Race User"
+  };
+
+  async start(): Promise<void> {
+    this.emit("state", "online" satisfies ConnectionState);
+    this.emit("login", this.self);
+    this.emit("logout");
+  }
+
+  async reconnect(): Promise<void> {}
+
+  async logout(): Promise<void> {
+    this.emit("logout");
+  }
+
+  async sendText(): Promise<{ messageId?: string; raw?: unknown }> {
+    return {};
+  }
+
+  async sendFile(): Promise<{ messageId?: string; raw?: unknown }> {
+    return {};
+  }
+
+  async downloadMedia(): Promise<undefined> {
+    return undefined;
+  }
+
+  async getContacts(): Promise<ContactInput[]> {
+    return [];
+  }
+
+  getCurrentUser(): UserProfile {
+    return this.self;
   }
 
   getSessionData(): unknown | undefined {
@@ -217,7 +264,7 @@ afterEach(() => {
 
 describe("WeChatRuntime", () => {
   it("shows the QR login screen without the startup splash when no saved session exists", async () => {
-    const store = new SqliteStore(tempDb());
+    const store = await SqliteStore.open(tempDb());
     const protocol = new QrOnlyProtocol();
     const renderer = new FakeRenderer();
     const runtime = new WeChatRuntime(protocol, store, renderer, { initialHistoryLimit: 10 });
@@ -227,12 +274,12 @@ describe("WeChatRuntime", () => {
     expect(renderer.states.some((state) => state.view === "startup")).toBe(false);
     expect(renderer.latest.view).toBe("login");
     expect(renderer.latest.qr?.uuid).toBe("qr-only");
-    store.close();
+    await store.close();
   });
 
   it("shows the startup splash only after a saved session restores login", async () => {
-    const store = new SqliteStore(tempDb());
-    store.setSessionData({ restored: true });
+    const store = await SqliteStore.open(tempDb());
+    await store.setSessionData({ restored: true });
     const protocol = new ContactsBeforeLoginProtocol();
     const renderer = new FakeRenderer();
     const runtime = new WeChatRuntime(protocol, store, renderer, {
@@ -246,11 +293,11 @@ describe("WeChatRuntime", () => {
     expect(renderer.states.some((state) => state.view === "startup")).toBe(true);
     expect(renderer.latest.view).toBe("chats");
     expect(renderer.latest.accountName).toBe("Early User");
-    store.close();
+    await store.close();
   });
 
   it("handles contacts that arrive before the login event during session restart", async () => {
-    const store = new SqliteStore(tempDb());
+    const store = await SqliteStore.open(tempDb());
     const protocol = new ContactsBeforeLoginProtocol();
     const renderer = new FakeRenderer();
     const runtime = new WeChatRuntime(protocol, store, renderer, { initialHistoryLimit: 10 });
@@ -259,12 +306,26 @@ describe("WeChatRuntime", () => {
 
     expect(renderer.latest.view).toBe("chats");
     expect(renderer.latest.accountName).toBe("Early User");
-    expect(store.searchContacts("Early Boss")).toHaveLength(1);
-    store.close();
+    expect(await store.searchContacts("Early Boss")).toHaveLength(1);
+    await store.close();
+  });
+
+  it("serializes logout after a pending login event", async () => {
+    const store = await SqliteStore.open(tempDb());
+    const protocol = new LoginThenLogoutProtocol();
+    const renderer = new FakeRenderer();
+    const runtime = new WeChatRuntime(protocol, store, renderer, { initialHistoryLimit: 10 });
+
+    await runtime.start();
+
+    expect(renderer.latest.connectionState).toBe("logout");
+    expect(renderer.latest.accountName).toBeUndefined();
+    expect(renderer.latest.statusMessage).toBe("logged out. Use q to quit.");
+    await store.close();
   });
 
   it("folds public account conversations in the recent chat list", async () => {
-    const store = new SqliteStore(tempDb());
+    const store = await SqliteStore.open(tempDb());
     const protocol = new PublicConversationProtocol();
     const renderer = new FakeRenderer();
     const runtime = new WeChatRuntime(protocol, store, renderer, { initialHistoryLimit: 10 });
@@ -291,11 +352,11 @@ describe("WeChatRuntime", () => {
     await runtime.handleKey(key.enter());
     expect(renderer.latest.view).toBe("chat");
     expect(renderer.latest.activeConversation?.title).toBe("City Services");
-    store.close();
+    await store.close();
   });
 
   it("renders an update notification when a newer package version is available", async () => {
-    const store = new SqliteStore(tempDb());
+    const store = await SqliteStore.open(tempDb());
     const protocol = new MockProtocol();
     const renderer = new FakeRenderer();
     const runtime = new WeChatRuntime(protocol, store, renderer, {
@@ -312,11 +373,11 @@ describe("WeChatRuntime", () => {
     await new Promise<void>((resolve) => setImmediate(resolve));
 
     expect(renderer.latest.updateInfo?.latestVersion).toBe("0.1.2");
-    store.close();
+    await store.close();
   });
 
   it("skips duplicate incoming messages before refreshing runtime state", async () => {
-    const store = new SqliteStore(tempDb());
+    const store = await SqliteStore.open(tempDb());
     const protocol = new MockProtocol();
     const renderer = new FakeRenderer();
     const runtime = new WeChatRuntime(protocol, store, renderer, { initialHistoryLimit: 10 });
@@ -325,19 +386,19 @@ describe("WeChatRuntime", () => {
     protocol.emitIncoming("Boss", "same message", 1_700_000_000_000);
     await flushRender();
     const renderCountAfterFirstMessage = renderer.states.length;
-    const unreadAfterFirstMessage = store.totalUnreadCount();
+    const unreadAfterFirstMessage = await store.totalUnreadCount();
 
     protocol.emitIncoming("Boss", "same message", 1_700_000_000_000);
     await flushRender();
 
     expect(renderer.states).toHaveLength(renderCountAfterFirstMessage);
-    expect(store.totalUnreadCount()).toBe(unreadAfterFirstMessage);
-    expect(store.listRecentConversations()).toHaveLength(1);
-    store.close();
+    expect(await store.totalUnreadCount()).toBe(unreadAfterFirstMessage);
+    expect(await store.listRecentConversations()).toHaveLength(1);
+    await store.close();
   });
 
   it("coalesces renders for incoming message bursts", async () => {
-    const store = new SqliteStore(tempDb());
+    const store = await SqliteStore.open(tempDb());
     const protocol = new MockProtocol();
     const renderer = new FakeRenderer();
     const runtime = new WeChatRuntime(protocol, store, renderer, { initialHistoryLimit: 10 });
@@ -352,11 +413,11 @@ describe("WeChatRuntime", () => {
     await flushRender();
     expect(renderer.states).toHaveLength(renderCountBeforeMessages + 1);
     expect(renderer.latest.conversations.map((conversation) => conversation.title)).toEqual(["Project A", "Boss"]);
-    store.close();
+    await store.close();
   });
 
   it("uses the stored useful contact name for a sparse incoming sender", async () => {
-    const store = new SqliteStore(tempDb());
+    const store = await SqliteStore.open(tempDb());
     const protocol = new MockProtocol();
     const renderer = new FakeRenderer();
     const runtime = new WeChatRuntime(protocol, store, renderer, { initialHistoryLimit: 10 });
@@ -388,13 +449,13 @@ describe("WeChatRuntime", () => {
 
     const storedConversation = renderer.latest.conversations.find((item) => item.title === "Boss");
     expect(storedConversation).toBeDefined();
-    expect(store.listMessages(storedConversation?.id ?? "")[0]?.senderName).toBe("Boss");
+    expect((await store.listMessages(storedConversation?.id ?? ""))[0]?.senderName).toBe("Boss");
     expect(storedConversation?.lastMessageSenderName).toBe("Boss");
-    store.close();
+    await store.close();
   });
 
   it("does not expose group message senders as searchable contacts", async () => {
-    const store = new SqliteStore(tempDb());
+    const store = await SqliteStore.open(tempDb());
     const protocol = new MockProtocol();
     const renderer = new FakeRenderer();
     const runtime = new WeChatRuntime(protocol, store, renderer, { initialHistoryLimit: 10 });
@@ -425,17 +486,17 @@ describe("WeChatRuntime", () => {
     await flushRender();
 
     const storedConversation = renderer.latest.conversations.find((item) => item.title === "Project A");
-    const message = store.listMessages(storedConversation?.id ?? "")[0];
+    const message = (await store.listMessages(storedConversation?.id ?? ""))[0];
     expect(message?.senderName).toBe("Mock Member");
     expect(message?.senderKind).toBe("group-member");
     expect(message?.senderProtocolId).toBe("@mock-member");
-    expect(store.searchContacts("Mock Member")).toHaveLength(0);
-    expect(store.searchContacts("Project A")).toHaveLength(1);
-    store.close();
+    expect(await store.searchContacts("Mock Member")).toHaveLength(0);
+    expect(await store.searchContacts("Project A")).toHaveLength(1);
+    await store.close();
   });
 
   it("backfills sparse group message sender names from later group member metadata", async () => {
-    const store = new SqliteStore(tempDb());
+    const store = await SqliteStore.open(tempDb());
     const protocol = new MockProtocol();
     const renderer = new FakeRenderer();
     const runtime = new WeChatRuntime(protocol, store, renderer, { initialHistoryLimit: 10 });
@@ -466,7 +527,7 @@ describe("WeChatRuntime", () => {
     await flushRender();
 
     const storedConversation = renderer.latest.conversations.find((item) => item.title === "Late Project");
-    expect(store.listMessages(storedConversation?.id ?? "")[0]?.senderName).toBe("Group member");
+    expect((await store.listMessages(storedConversation?.id ?? ""))[0]?.senderName).toBe("Group member");
 
     protocol.emit("contacts", [
       {
@@ -477,15 +538,16 @@ describe("WeChatRuntime", () => {
         }
       }
     ]);
+    await flushRender();
 
-    expect(store.listMessages(storedConversation?.id ?? "")[0]?.senderName).toBe("Late Member");
-    expect(store.findConversationById(storedConversation?.id ?? "")?.lastMessageSenderName).toBe("Late Member");
-    expect(store.searchContacts("Late Member")).toHaveLength(0);
-    store.close();
+    expect((await store.listMessages(storedConversation?.id ?? ""))[0]?.senderName).toBe("Late Member");
+    expect((await store.findConversationById(storedConversation?.id ?? ""))?.lastMessageSenderName).toBe("Late Member");
+    expect(await store.searchContacts("Late Member")).toHaveLength(0);
+    await store.close();
   });
 
   it("uses redraw state for chats, keyboard navigation, chat input, unread status, and search", async () => {
-    const store = new SqliteStore(tempDb());
+    const store = await SqliteStore.open(tempDb());
     const protocol = new MockProtocol();
     const renderer = new FakeRenderer();
     const runtime = new WeChatRuntime(protocol, store, renderer, { initialHistoryLimit: 10 });
@@ -502,7 +564,7 @@ describe("WeChatRuntime", () => {
     await runtime.handleKey(key.enter());
     expect(renderer.latest.view).toBe("chat");
     expect(renderer.latest.activeConversation?.title).toBe("Boss");
-    expect(store.totalUnreadCount()).toBe(0);
+    expect(await store.totalUnreadCount()).toBe(0);
     expect(renderer.latest.messages.map((message) => message.content)).toContain("meet at three");
 
     await pressText(runtime, "yes");
@@ -515,7 +577,7 @@ describe("WeChatRuntime", () => {
     expect(renderer.latest.view).toBe("chat");
     expect(renderer.latest.messages.every((message) => message.conversationId === renderer.latest.activeConversation?.id)).toBe(true);
     expect(renderer.latest.unreadConversations.some((conversation) => conversation.title === "Project A")).toBe(true);
-    expect(store.totalUnreadCount()).toBe(1);
+    expect(await store.totalUnreadCount()).toBe(1);
 
     await runtime.handleKey(key.escape());
     expect(renderer.latest.view).toBe("chats");
@@ -544,11 +606,11 @@ describe("WeChatRuntime", () => {
     expect(renderer.latest.activeConversation?.title).toBe("Project A");
     expect(renderer.latest.activeConversation?.id).toBe(projectConversationFromRecent?.id);
     expect(renderer.latest.messages.map((message) => message.content)).toContain("field changed");
-    store.close();
+    await store.close();
   });
 
   it("scrolls chat messages with arrow keys instead of prompt history", async () => {
-    const store = new SqliteStore(tempDb());
+    const store = await SqliteStore.open(tempDb());
     const protocol = new MockProtocol();
     const renderer = new FakeRenderer();
     const runtime = new WeChatRuntime(protocol, store, renderer, { initialHistoryLimit: 10 });
@@ -570,11 +632,11 @@ describe("WeChatRuntime", () => {
     expect(renderer.latest.chatInput).toBe("draft");
     expect(renderer.latest.messageScrollOffset).toBe(0);
 
-    store.close();
+    await store.close();
   });
 
   it("switches unread conversations from the active chat with tab", async () => {
-    const store = new SqliteStore(tempDb());
+    const store = await SqliteStore.open(tempDb());
     const protocol = new MockProtocol();
     const renderer = new FakeRenderer();
     const runtime = new WeChatRuntime(protocol, store, renderer, { initialHistoryLimit: 10 });
@@ -605,13 +667,13 @@ describe("WeChatRuntime", () => {
     });
     await flushRender();
     expect(renderer.latest.activeConversation?.title).toBe("Boss");
-    expect(store.totalUnreadCount()).toBe(2);
+    expect(await store.totalUnreadCount()).toBe(2);
 
     await runtime.handleKey(key.tab());
     expect(renderer.latest.conversationSwitcherActive).toBe(true);
     expect(renderer.latest.chatInput).toBe("draft");
     expect(renderer.latest.activeConversation?.title).toBe("Boss");
-    expect(store.totalUnreadCount()).toBe(2);
+    expect(await store.totalUnreadCount()).toBe(2);
     const firstSelection = renderer.latest.selectedSwitcherConversationId;
     expect(firstSelection).toBeTruthy();
 
@@ -646,7 +708,7 @@ describe("WeChatRuntime", () => {
     expect(renderer.latest.conversationSwitcherActive).toBe(false);
     expect(renderer.latest.activeConversation?.title).toBe(selectedSwitcherTitle);
     expect(renderer.latest.chatInput).toBe("");
-    expect(store.totalUnreadCount()).toBe(1);
+    expect(await store.totalUnreadCount()).toBe(1);
     const visibleReturnTarget = renderer.latest.switcherConversations.find((conversation) => conversation.title === "Boss");
     expect(visibleReturnTarget?.unreadCount).toBe(0);
     expect(renderer.latest.conversationSwitcherActive).toBe(false);
@@ -661,8 +723,8 @@ describe("WeChatRuntime", () => {
     await runtime.handleKey(key.enter());
     expect(renderer.latest.conversationSwitcherActive).toBe(false);
     expect(renderer.latest.activeConversation?.title).toBe("Boss");
-    expect(store.totalUnreadCount()).toBe(1);
-    store.close();
+    expect(await store.totalUnreadCount()).toBe(1);
+    await store.close();
   });
 
   it("sends quoted image paths with spaces", async () => {
@@ -670,7 +732,7 @@ describe("WeChatRuntime", () => {
     tempDirs.push(imageDir);
     const imagePath = join(imageDir, "sample image 2026-05-28.png");
     writeFileSync(imagePath, "fake png");
-    const store = new SqliteStore(tempDb());
+    const store = await SqliteStore.open(tempDb());
     const protocol = new CapturingFileProtocol();
     const renderer = new FakeRenderer();
     const runtime = new WeChatRuntime(protocol, store, renderer, { initialHistoryLimit: 10 });
@@ -684,11 +746,11 @@ describe("WeChatRuntime", () => {
     expect(protocol.sentFiles.at(-1)?.filePath).toBe(imagePath);
     expect(renderer.latest.errorMessage).toBeUndefined();
     expect(renderer.latest.messages.at(-1)?.content).toContain("[image]");
-    store.close();
+    await store.close();
   });
 
   it("navigates to search via the search item in conversation list", async () => {
-    const store = new SqliteStore(tempDb());
+    const store = await SqliteStore.open(tempDb());
     const protocol = new MockProtocol();
     const renderer = new FakeRenderer();
     const runtime = new WeChatRuntime(protocol, store, renderer, { initialHistoryLimit: 10 });
@@ -710,11 +772,11 @@ describe("WeChatRuntime", () => {
     await runtime.handleKey(key.enter());
     expect(renderer.latest.view).toBe("chat");
     expect(renderer.latest.activeConversation?.title).toBe("Boss");
-    store.close();
+    await store.close();
   });
 
   it("opens current contacts from search with stale conversation history merged", async () => {
-    const store = new SqliteStore(tempDb());
+    const store = await SqliteStore.open(tempDb());
     const protocol = new MockProtocol();
     const renderer = new FakeRenderer();
     const staleContact: ContactInput = {
@@ -726,9 +788,9 @@ describe("WeChatRuntime", () => {
     };
     const staleConversation = conversationFromContact(staleContact);
 
-    store.setActiveAccount(protocol.getCurrentUser());
-    store.upsertContact(staleContact);
-    store.saveMessage(
+    await store.setActiveAccount(protocol.getCurrentUser());
+    await store.upsertContact(staleContact);
+    await store.saveMessage(
       {
         id: localMessageId([staleConversation.id, "old history"]),
         conversationId: staleConversation.id,
@@ -753,12 +815,12 @@ describe("WeChatRuntime", () => {
     expect(renderer.latest.activeConversation?.title).toBe("Boss");
     expect(renderer.latest.activeConversation?.protocolId).toBe("@boss");
     expect(renderer.latest.messages.map((message) => message.content)).toContain("old history");
-    expect(store.findConversationById(staleConversation.id)).toBeUndefined();
-    store.close();
+    expect(await store.findConversationById(staleConversation.id)).toBeUndefined();
+    await store.close();
   });
 
   it("opens stale recent conversations through the current contact conversation", async () => {
-    const store = new SqliteStore(tempDb());
+    const store = await SqliteStore.open(tempDb());
     const protocol = new MockProtocol();
     const renderer = new FakeRenderer();
     const staleContact: ContactInput = {
@@ -770,9 +832,9 @@ describe("WeChatRuntime", () => {
     };
     const staleConversation = conversationFromContact(staleContact);
 
-    store.setActiveAccount(protocol.getCurrentUser());
-    store.upsertContact(staleContact);
-    store.saveMessage(
+    await store.setActiveAccount(protocol.getCurrentUser());
+    await store.upsertContact(staleContact);
+    await store.saveMessage(
       {
         id: localMessageId([staleConversation.id, "old list history"]),
         conversationId: staleConversation.id,
@@ -794,12 +856,12 @@ describe("WeChatRuntime", () => {
     expect(renderer.latest.view).toBe("chat");
     expect(renderer.latest.activeConversation?.protocolId).toBe("@boss");
     expect(renderer.latest.messages.map((message) => message.content)).toContain("old list history");
-    expect(store.findConversationById(staleConversation.id)).toBeUndefined();
-    store.close();
+    expect(await store.findConversationById(staleConversation.id)).toBeUndefined();
+    await store.close();
   });
 
   it("opens stale group conversations through the current group contact conversation", async () => {
-    const store = new SqliteStore(tempDb());
+    const store = await SqliteStore.open(tempDb());
     const protocol = new MockProtocol();
     const renderer = new FakeRenderer();
     const staleContact: ContactInput = {
@@ -811,9 +873,9 @@ describe("WeChatRuntime", () => {
     };
     const staleConversation = conversationFromContact(staleContact);
 
-    store.setActiveAccount(protocol.getCurrentUser());
-    store.upsertContact(staleContact);
-    store.saveMessage(
+    await store.setActiveAccount(protocol.getCurrentUser());
+    await store.upsertContact(staleContact);
+    await store.saveMessage(
       {
         id: localMessageId([staleConversation.id, "old group list history"]),
         conversationId: staleConversation.id,
@@ -835,12 +897,12 @@ describe("WeChatRuntime", () => {
     expect(renderer.latest.view).toBe("chat");
     expect(renderer.latest.activeConversation?.protocolId).toBe("@@project-a");
     expect(renderer.latest.messages.map((message) => message.content)).toContain("old group list history");
-    expect(store.findConversationById(staleConversation.id)).toBeUndefined();
-    store.close();
+    expect(await store.findConversationById(staleConversation.id)).toBeUndefined();
+    await store.close();
   });
 
   it("merges stale conversations when a current contact message arrives", async () => {
-    const store = new SqliteStore(tempDb());
+    const store = await SqliteStore.open(tempDb());
     const protocol = new MockProtocol();
     const renderer = new FakeRenderer();
     const staleContact: ContactInput = {
@@ -852,9 +914,9 @@ describe("WeChatRuntime", () => {
     };
     const staleConversation = conversationFromContact(staleContact);
 
-    store.setActiveAccount(protocol.getCurrentUser());
-    store.upsertContact(staleContact);
-    store.saveMessage(
+    await store.setActiveAccount(protocol.getCurrentUser());
+    await store.upsertContact(staleContact);
+    await store.saveMessage(
       {
         id: localMessageId([staleConversation.id, "old incoming history"]),
         conversationId: staleConversation.id,
@@ -874,19 +936,19 @@ describe("WeChatRuntime", () => {
     protocol.emitIncoming("Boss", "new incoming", 1_700_000_100_000);
     await flushRender();
 
-    const bossConversations = store.listRecentConversations().filter((conversation) => conversation.title === "Boss");
+    const bossConversations = (await store.listRecentConversations()).filter((conversation) => conversation.title === "Boss");
     expect(bossConversations).toHaveLength(1);
     expect(bossConversations[0]?.protocolId).toBe("@boss");
-    expect(store.findConversationById(staleConversation.id)).toBeUndefined();
-    expect(store.listMessages(bossConversations[0]!.id).map((message) => message.content)).toEqual([
+    expect(await store.findConversationById(staleConversation.id)).toBeUndefined();
+    expect((await store.listMessages(bossConversations[0]!.id)).map((message) => message.content)).toEqual([
       "old incoming history",
       "new incoming"
     ]);
-    store.close();
+    await store.close();
   });
 
   it("ignores a duplicate enter immediately after opening contact search", async () => {
-    const store = new SqliteStore(tempDb());
+    const store = await SqliteStore.open(tempDb());
     const protocol = new MockProtocol();
     const renderer = new FakeRenderer();
     const runtime = new WeChatRuntime(protocol, store, renderer, { initialHistoryLimit: 10 });
@@ -903,11 +965,11 @@ describe("WeChatRuntime", () => {
     await runtime.handleKey(key.enter());
     expect(renderer.latest.view).toBe("chat");
     expect(renderer.latest.activeConversation?.title).toBe("Boss");
-    store.close();
+    await store.close();
   });
 
   it("opens the conversation selected by the pi-tui SelectList event", async () => {
-    const store = new SqliteStore(tempDb());
+    const store = await SqliteStore.open(tempDb());
     const protocol = new MockProtocol();
     const renderer = new FakeRenderer();
     const runtime = new WeChatRuntime(protocol, store, renderer, { initialHistoryLimit: 10 });
@@ -926,6 +988,6 @@ describe("WeChatRuntime", () => {
     await runtime.handleUiEvent({ type: "conversation-open", conversationId: boss?.id });
     expect(renderer.latest.view).toBe("chat");
     expect(renderer.latest.activeConversation?.title).toBe("Boss");
-    store.close();
+    await store.close();
   });
 });

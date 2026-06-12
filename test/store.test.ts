@@ -33,11 +33,11 @@ afterEach(() => {
 });
 
 describe("SqliteStore", () => {
-  it("persists sessions, contacts, conversations, messages, unread counts, and search", () => {
+  it("persists sessions, contacts, conversations, messages, unread counts, and search", async () => {
     const dbPath = tempDb();
-    const store = new SqliteStore(dbPath);
-    store.setActiveAccount(accountA);
-    store.setSessionData({ sid: "abc" });
+    const store = await SqliteStore.open(dbPath);
+    await store.setActiveAccount(accountA);
+    await store.setSessionData({ sid: "abc" });
 
     const contact: ContactInput = {
       id: contactId("private", ["boss"]),
@@ -46,9 +46,9 @@ describe("SqliteStore", () => {
       displayName: "Boss",
       remarkName: "Boss"
     };
-    store.upsertContact(contact);
+    await store.upsertContact(contact);
     const conversation = conversationFromContact(contact);
-    const message = store.saveMessage(
+    const message = await store.saveMessage(
       {
         id: localMessageId([conversation.id, "hello", "1"]),
         conversationId: conversation.id,
@@ -64,24 +64,83 @@ describe("SqliteStore", () => {
     );
 
     expect(message.content).toBe("hello from local cache");
-    expect(store.totalUnreadCount()).toBe(1);
-    expect(store.searchMessages("cache")).toHaveLength(1);
-    expect(store.listRecentConversations()[0]?.title).toBe("Boss");
-    store.close();
+    expect(await store.totalUnreadCount()).toBe(1);
+    expect(await store.searchMessages("cache")).toHaveLength(1);
+    expect((await store.listRecentConversations())[0]?.title).toBe("Boss");
+    await store.close();
 
-    const reopened = new SqliteStore(dbPath);
-    reopened.setActiveAccount(accountA);
-    expect(reopened.getSessionData()).toEqual({ sid: "abc" });
-    expect(reopened.findContactByName("Boss")?.protocolId).toBe("@boss");
-    expect(reopened.listMessages(conversation.id)).toHaveLength(1);
-    reopened.markRead(conversation.id);
-    expect(reopened.totalUnreadCount()).toBe(0);
-    reopened.close();
+    const reopened = await SqliteStore.open(dbPath);
+    await reopened.setActiveAccount(accountA);
+    expect(await reopened.getSessionData()).toEqual({ sid: "abc" });
+    expect((await reopened.findContactByName("Boss"))?.protocolId).toBe("@boss");
+    expect(await reopened.listMessages(conversation.id)).toHaveLength(1);
+    await reopened.markRead(conversation.id);
+    expect(await reopened.totalUnreadCount()).toBe(0);
+    await reopened.close();
   });
 
-  it("backfills sender names when a richer contact for the same protocol id is synced later", () => {
-    const store = new SqliteStore(tempDb());
-    store.setActiveAccount(accountA);
+  it("serializes concurrent transactional message writes", async () => {
+    const store = await SqliteStore.open(tempDb());
+    await store.setActiveAccount(accountA);
+    const boss: ContactInput = {
+      id: contactId("private", ["concurrent-boss"]),
+      protocolId: "@concurrent-boss",
+      kind: "private",
+      displayName: "Concurrent Boss"
+    };
+    const teammate: ContactInput = {
+      id: contactId("private", ["concurrent-teammate"]),
+      protocolId: "@concurrent-teammate",
+      kind: "private",
+      displayName: "Concurrent Teammate"
+    };
+    const bossConversation = conversationFromContact(boss);
+    const teammateConversation = conversationFromContact(teammate);
+
+    await Promise.all([
+      store.saveMessage(
+        {
+          id: localMessageId([bossConversation.id, "concurrent-one"]),
+          conversationId: bossConversation.id,
+          senderId: boss.id,
+          senderName: "Concurrent Boss",
+          isSelf: false,
+          content: "first concurrent message",
+          type: "text",
+          timestamp: 1_700_000_000_000
+        },
+        bossConversation,
+        true
+      ),
+      store.saveMessage(
+        {
+          id: localMessageId([teammateConversation.id, "concurrent-two"]),
+          conversationId: teammateConversation.id,
+          senderId: teammate.id,
+          senderName: "Concurrent Teammate",
+          isSelf: false,
+          content: "second concurrent message",
+          type: "text",
+          timestamp: 1_700_000_100_000
+        },
+        teammateConversation,
+        true
+      )
+    ]);
+
+    expect(await store.totalUnreadCount()).toBe(2);
+    expect(await store.listMessages(bossConversation.id)).toHaveLength(1);
+    expect(await store.listMessages(teammateConversation.id)).toHaveLength(1);
+    expect((await store.listRecentConversations(2)).map((conversation) => conversation.id)).toEqual([
+      teammateConversation.id,
+      bossConversation.id
+    ]);
+    await store.close();
+  });
+
+  it("backfills sender names when a richer contact for the same protocol id is synced later", async () => {
+    const store = await SqliteStore.open(tempDb());
+    await store.setActiveAccount(accountA);
     const sparseContact: ContactInput = {
       id: contactId("private", ["@alice"]),
       protocolId: "@alice",
@@ -96,8 +155,8 @@ describe("SqliteStore", () => {
     };
     const conversation = conversationFromContact(group);
 
-    store.upsertContact(sparseContact);
-    store.saveMessage(
+    await store.upsertContact(sparseContact);
+    await store.saveMessage(
       {
         id: localMessageId([conversation.id, sparseContact.id, "hello"]),
         conversationId: conversation.id,
@@ -112,7 +171,7 @@ describe("SqliteStore", () => {
       true
     );
 
-    store.upsertContact({
+    await store.upsertContact({
       id: contactId("private", ["Alice", "@alice"]),
       protocolId: "@alice",
       kind: "private",
@@ -120,13 +179,13 @@ describe("SqliteStore", () => {
       nickName: "Alice"
     });
 
-    expect(store.listMessages(conversation.id)[0]?.senderName).toBe("Alice");
-    store.close();
+    expect((await store.listMessages(conversation.id))[0]?.senderName).toBe("Alice");
+    await store.close();
   });
 
-  it("backfills and preserves useful group conversation titles over protocol placeholders", () => {
-    const store = new SqliteStore(tempDb());
-    store.setActiveAccount(accountA);
+  it("backfills and preserves useful group conversation titles over protocol placeholders", async () => {
+    const store = await SqliteStore.open(tempDb());
+    await store.setActiveAccount(accountA);
     const sparseGroup: ContactInput = {
       id: contactId("group", ["@@project"]),
       protocolId: "@@project",
@@ -135,7 +194,7 @@ describe("SqliteStore", () => {
     };
     const sparseConversation = conversationFromContact(sparseGroup);
 
-    store.saveMessage(
+    await store.saveMessage(
       {
         id: localMessageId([sparseConversation.id, "first"]),
         conversationId: sparseConversation.id,
@@ -148,16 +207,16 @@ describe("SqliteStore", () => {
       sparseConversation,
       true
     );
-    expect(store.findConversationById(sparseConversation.id)?.title).toBe("@@project");
+    expect((await store.findConversationById(sparseConversation.id))?.title).toBe("@@project");
 
-    store.upsertContact({
+    await store.upsertContact({
       ...sparseGroup,
       displayName: "Project Group",
       nickName: "Project Group"
     });
-    expect(store.findConversationById(sparseConversation.id)?.title).toBe("Project Group");
+    expect((await store.findConversationById(sparseConversation.id))?.title).toBe("Project Group");
 
-    store.saveMessage(
+    await store.saveMessage(
       {
         id: localMessageId([sparseConversation.id, "second"]),
         conversationId: sparseConversation.id,
@@ -171,13 +230,13 @@ describe("SqliteStore", () => {
       true
     );
 
-    expect(store.findConversationById(sparseConversation.id)?.title).toBe("Project Group");
-    store.close();
+    expect((await store.findConversationById(sparseConversation.id))?.title).toBe("Project Group");
+    await store.close();
   });
 
-  it("backfills same-id placeholder sender names when a sparse contact becomes useful", () => {
-    const store = new SqliteStore(tempDb());
-    store.setActiveAccount(accountA);
+  it("backfills same-id placeholder sender names when a sparse contact becomes useful", async () => {
+    const store = await SqliteStore.open(tempDb());
+    await store.setActiveAccount(accountA);
     const aliceId = contactId("private", ["@alice"]);
     const sparseContact: ContactInput = {
       id: aliceId,
@@ -193,8 +252,8 @@ describe("SqliteStore", () => {
     };
     const conversation = conversationFromContact(group);
 
-    store.upsertContact(sparseContact);
-    store.saveMessage(
+    await store.upsertContact(sparseContact);
+    await store.saveMessage(
       {
         id: localMessageId([conversation.id, aliceId, "hello"]),
         conversationId: conversation.id,
@@ -209,20 +268,20 @@ describe("SqliteStore", () => {
       true
     );
 
-    store.upsertContact({
+    await store.upsertContact({
       ...sparseContact,
       displayName: "Alice",
       nickName: "Alice"
     });
 
-    expect(store.listMessages(conversation.id)[0]?.senderName).toBe("Alice");
-    expect(store.findConversationById(conversation.id)?.lastMessageSenderName).toBe("Alice");
-    store.close();
+    expect((await store.listMessages(conversation.id))[0]?.senderName).toBe("Alice");
+    expect((await store.findConversationById(conversation.id))?.lastMessageSenderName).toBe("Alice");
+    await store.close();
   });
 
-  it("does not backfill a conversation preview when the useful contact is not the latest sender", () => {
-    const store = new SqliteStore(tempDb());
-    store.setActiveAccount(accountA);
+  it("does not backfill a conversation preview when the useful contact is not the latest sender", async () => {
+    const store = await SqliteStore.open(tempDb());
+    await store.setActiveAccount(accountA);
     const aliceId = contactId("private", ["@alice"]);
     const bobId = contactId("private", ["@bob"]);
     const aliceSparse: ContactInput = {
@@ -245,9 +304,9 @@ describe("SqliteStore", () => {
     };
     const conversation = conversationFromContact(group);
 
-    store.upsertContact(aliceSparse);
-    store.upsertContact(bobSparse);
-    store.saveMessage(
+    await store.upsertContact(aliceSparse);
+    await store.upsertContact(bobSparse);
+    await store.saveMessage(
       {
         id: localMessageId([conversation.id, aliceId, "alice old"]),
         conversationId: conversation.id,
@@ -261,7 +320,7 @@ describe("SqliteStore", () => {
       conversation,
       true
     );
-    store.saveMessage(
+    await store.saveMessage(
       {
         id: localMessageId([conversation.id, bobId, "bob latest"]),
         conversationId: conversation.id,
@@ -276,23 +335,23 @@ describe("SqliteStore", () => {
       true
     );
 
-    store.upsertContact({
+    await store.upsertContact({
       ...aliceSparse,
       displayName: "Alice",
       nickName: "Alice"
     });
 
-    const messages = store.listMessages(conversation.id);
+    const messages = await store.listMessages(conversation.id);
     expect(messages[0]?.senderName).toBe("Alice");
     expect(messages[1]?.senderName).toBe("Group member");
-    expect(store.findConversationById(conversation.id)?.lastMessagePreview).toBe("bob latest");
-    expect(store.findConversationById(conversation.id)?.lastMessageSenderName).toBe("Group member");
-    store.close();
+    expect((await store.findConversationById(conversation.id))?.lastMessagePreview).toBe("bob latest");
+    expect((await store.findConversationById(conversation.id))?.lastMessageSenderName).toBe("Group member");
+    await store.close();
   });
 
-  it("backfills group sender names from updated group member metadata", () => {
-    const store = new SqliteStore(tempDb());
-    store.setActiveAccount(accountA);
+  it("backfills group sender names from updated group member metadata", async () => {
+    const store = await SqliteStore.open(tempDb());
+    await store.setActiveAccount(accountA);
     const aliceId = contactId("private", ["@alice"]);
     const sparseContact: ContactInput = {
       id: aliceId,
@@ -315,8 +374,8 @@ describe("SqliteStore", () => {
     const conversation = conversationFromContact(group);
     const otherConversation = conversationFromContact(otherGroup);
 
-    store.upsertContact(sparseContact);
-    store.saveMessage(
+    await store.upsertContact(sparseContact);
+    await store.saveMessage(
       {
         id: localMessageId([conversation.id, aliceId, "project message"]),
         conversationId: conversation.id,
@@ -330,7 +389,7 @@ describe("SqliteStore", () => {
       conversation,
       true
     );
-    store.saveMessage(
+    await store.saveMessage(
       {
         id: localMessageId([otherConversation.id, aliceId, "other message"]),
         conversationId: otherConversation.id,
@@ -345,7 +404,7 @@ describe("SqliteStore", () => {
       true
     );
 
-    store.upsertContact({
+    await store.upsertContact({
       ...group,
       raw: {
         UserName: "@@project",
@@ -359,17 +418,17 @@ describe("SqliteStore", () => {
       }
     });
 
-    expect(store.listMessages(conversation.id)[0]?.senderName).toBe("Alice in Project");
-    expect(store.findConversationById(conversation.id)?.lastMessageSenderName).toBe("Alice in Project");
-    expect(store.listMessages(otherConversation.id)[0]?.senderName).toBe("Group member");
-    expect(store.findConversationById(otherConversation.id)?.lastMessageSenderName).toBe("Group member");
-    store.close();
+    expect((await store.listMessages(conversation.id))[0]?.senderName).toBe("Alice in Project");
+    expect((await store.findConversationById(conversation.id))?.lastMessageSenderName).toBe("Alice in Project");
+    expect((await store.listMessages(otherConversation.id))[0]?.senderName).toBe("Group member");
+    expect((await store.findConversationById(otherConversation.id))?.lastMessageSenderName).toBe("Group member");
+    await store.close();
   });
 
-  it("migrates legacy group member contacts into group message senders", () => {
+  it("migrates legacy group member contacts into group message senders", async () => {
     const dbPath = tempDb();
-    const store = new SqliteStore(dbPath);
-    store.setActiveAccount(accountA);
+    const store = await SqliteStore.open(dbPath);
+    await store.setActiveAccount(accountA);
     const leakedMember: ContactInput = {
       id: contactId("private", ["@alice"]),
       protocolId: "@alice",
@@ -394,9 +453,9 @@ describe("SqliteStore", () => {
     };
     const conversation = conversationFromContact(group);
 
-    store.upsertContact(leakedMember);
-    store.upsertContact(group);
-    store.saveMessage(
+    await store.upsertContact(leakedMember);
+    await store.upsertContact(group);
+    await store.saveMessage(
       {
         id: localMessageId([conversation.id, leakedMember.id, "legacy hello"]),
         conversationId: conversation.id,
@@ -410,24 +469,24 @@ describe("SqliteStore", () => {
       conversation,
       true
     );
-    store.close();
+    await store.close();
 
-    const reopened = new SqliteStore(dbPath);
-    reopened.setActiveAccount(accountA);
-    const message = reopened.listMessages(conversation.id)[0];
+    const reopened = await SqliteStore.open(dbPath);
+    await reopened.setActiveAccount(accountA);
+    const message = (await reopened.listMessages(conversation.id))[0];
     expect(message?.senderId).toBe(groupMemberId(conversation.id, "@alice"));
     expect(message?.senderKind).toBe("group-member");
     expect(message?.senderProtocolId).toBe("@alice");
     expect(message?.senderName).toBe("Alice in Project");
-    expect(reopened.findConversationById(conversation.id)?.lastMessageSenderName).toBe("Alice in Project");
-    expect(reopened.searchContacts("Group member")).toHaveLength(0);
-    reopened.close();
+    expect((await reopened.findConversationById(conversation.id))?.lastMessageSenderName).toBe("Alice in Project");
+    expect(await reopened.searchContacts("Group member")).toHaveLength(0);
+    await reopened.close();
   });
 
-  it("uses hidden private contact names as fallback group member names", () => {
+  it("uses hidden private contact names as fallback group member names", async () => {
     const dbPath = tempDb();
-    const store = new SqliteStore(dbPath);
-    store.setActiveAccount(accountA);
+    const store = await SqliteStore.open(dbPath);
+    await store.setActiveAccount(accountA);
     const leakedMember: ContactInput = {
       id: contactId("private", ["@alice"]),
       protocolId: "@alice",
@@ -453,10 +512,10 @@ describe("SqliteStore", () => {
     };
     const conversation = conversationFromContact(group);
 
-    store.upsertContact(leakedMember);
-    store.upsertContact(group);
-    store.markAllContactsStale();
-    store.saveMessage(
+    await store.upsertContact(leakedMember);
+    await store.upsertContact(group);
+    await store.markAllContactsStale();
+    await store.saveMessage(
       {
         id: localMessageId([conversation.id, leakedMember.id, "legacy unnamed"]),
         conversationId: conversation.id,
@@ -470,23 +529,23 @@ describe("SqliteStore", () => {
       conversation,
       true
     );
-    store.close();
+    await store.close();
 
-    const reopened = new SqliteStore(dbPath);
-    reopened.setActiveAccount(accountA);
-    const message = reopened.listMessages(conversation.id)[0];
+    const reopened = await SqliteStore.open(dbPath);
+    await reopened.setActiveAccount(accountA);
+    const message = (await reopened.listMessages(conversation.id))[0];
     expect(message?.senderId).toBe(groupMemberId(conversation.id, "@alice"));
     expect(message?.senderKind).toBe("group-member");
     expect(message?.senderProtocolId).toBe("@alice");
     expect(message?.senderName).toBe("Alice Contact");
-    expect(reopened.findConversationById(conversation.id)?.lastMessageSenderName).toBe("Alice Contact");
-    expect(reopened.searchContacts("Alice Contact")).toHaveLength(0);
-    reopened.close();
+    expect((await reopened.findConversationById(conversation.id))?.lastMessageSenderName).toBe("Alice Contact");
+    expect(await reopened.searchContacts("Alice Contact")).toHaveLength(0);
+    await reopened.close();
   });
 
-  it("enriches sparse group member upserts from hidden private contact names", () => {
-    const store = new SqliteStore(tempDb());
-    store.setActiveAccount(accountA);
+  it("enriches sparse group member upserts from hidden private contact names", async () => {
+    const store = await SqliteStore.open(tempDb());
+    await store.setActiveAccount(accountA);
     const leakedMember: ContactInput = {
       id: contactId("private", ["@alice"]),
       protocolId: "@alice",
@@ -502,9 +561,9 @@ describe("SqliteStore", () => {
     };
     const conversation = conversationFromContact(group);
 
-    store.upsertContact(leakedMember);
-    store.markAllContactsStale();
-    const member = store.upsertGroupMember({
+    await store.upsertContact(leakedMember);
+    await store.markAllContactsStale();
+    const member = await store.upsertGroupMember({
       id: groupMemberId(conversation.id, "@alice"),
       groupId: conversation.id,
       groupProtocolId: group.protocolId,
@@ -513,13 +572,13 @@ describe("SqliteStore", () => {
     });
 
     expect(member.displayName).toBe("Alice Contact");
-    expect(store.searchContacts("Alice Contact")).toHaveLength(0);
-    store.close();
+    expect(await store.searchContacts("Alice Contact")).toHaveLength(0);
+    await store.close();
   });
 
-  it("replaces hidden contact fallback group member names with richer group metadata", () => {
-    const store = new SqliteStore(tempDb());
-    store.setActiveAccount(accountA);
+  it("replaces hidden contact fallback group member names with richer group metadata", async () => {
+    const store = await SqliteStore.open(tempDb());
+    await store.setActiveAccount(accountA);
     const leakedMember: ContactInput = {
       id: contactId("private", ["@alice"]),
       protocolId: "@alice",
@@ -535,16 +594,16 @@ describe("SqliteStore", () => {
     };
     const conversation = conversationFromContact(group);
 
-    store.upsertContact(leakedMember);
-    store.markAllContactsStale();
-    const fallbackMember = store.upsertGroupMember({
+    await store.upsertContact(leakedMember);
+    await store.markAllContactsStale();
+    const fallbackMember = await store.upsertGroupMember({
       id: groupMemberId(conversation.id, "@alice"),
       groupId: conversation.id,
       groupProtocolId: group.protocolId,
       memberProtocolId: "@alice",
       displayName: "Group member"
     });
-    store.saveMessage(
+    await store.saveMessage(
       {
         id: localMessageId([conversation.id, "@alice", "fallback name"]),
         conversationId: conversation.id,
@@ -561,7 +620,7 @@ describe("SqliteStore", () => {
       true
     );
 
-    store.upsertGroupMember({
+    await store.upsertGroupMember({
       id: groupMemberId(conversation.id, "@alice"),
       groupId: conversation.id,
       groupProtocolId: group.protocolId,
@@ -569,14 +628,14 @@ describe("SqliteStore", () => {
       displayName: "Alice in Project"
     });
 
-    expect(store.listMessages(conversation.id)[0]?.senderName).toBe("Alice in Project");
-    expect(store.findConversationById(conversation.id)?.lastMessageSenderName).toBe("Alice in Project");
-    store.close();
+    expect((await store.listMessages(conversation.id))[0]?.senderName).toBe("Alice in Project");
+    expect((await store.findConversationById(conversation.id))?.lastMessageSenderName).toBe("Alice in Project");
+    await store.close();
   });
 
-  it("preserves existing contact raw metadata when a later sparse upsert has no raw", () => {
-    const store = new SqliteStore(tempDb());
-    store.setActiveAccount(accountA);
+  it("preserves existing contact raw metadata when a later sparse upsert has no raw", async () => {
+    const store = await SqliteStore.open(tempDb());
+    await store.setActiveAccount(accountA);
     const group: ContactInput = {
       id: contactId("group", ["project"]),
       protocolId: "@@project",
@@ -593,19 +652,19 @@ describe("SqliteStore", () => {
       }
     };
 
-    store.upsertContact(group);
-    const saved = store.upsertContact({
+    await store.upsertContact(group);
+    const saved = await store.upsertContact({
       ...group,
       raw: undefined
     });
 
     expect((saved.raw as { MemberList?: unknown[] } | undefined)?.MemberList).toHaveLength(1);
-    store.close();
+    await store.close();
   });
 
-  it("keeps a useful contact name when a later sparse update arrives for the same id", () => {
-    const store = new SqliteStore(tempDb());
-    store.setActiveAccount(accountA);
+  it("keeps a useful contact name when a later sparse update arrives for the same id", async () => {
+    const store = await SqliteStore.open(tempDb());
+    await store.setActiveAccount(accountA);
     const richContact: ContactInput = {
       id: contactId("private", ["@alice"]),
       protocolId: "@alice",
@@ -614,8 +673,8 @@ describe("SqliteStore", () => {
       nickName: "Alice"
     };
 
-    store.upsertContact(richContact);
-    const saved = store.upsertContact({
+    await store.upsertContact(richContact);
+    const saved = await store.upsertContact({
       ...richContact,
       displayName: "Group member",
       nickName: undefined
@@ -623,13 +682,13 @@ describe("SqliteStore", () => {
 
     expect(saved.displayName).toBe("Alice");
     expect(saved.nickName).toBe("Alice");
-    expect(store.listContacts("private", 10).map((contact) => contact.displayName)).toEqual(["Alice"]);
-    store.close();
+    expect((await store.listContacts("private", 10)).map((contact) => contact.displayName)).toEqual(["Alice"]);
+    await store.close();
   });
 
-  it("deduplicates protocol contacts and backfills placeholder conversation titles", () => {
-    const store = new SqliteStore(tempDb());
-    store.setActiveAccount(accountA);
+  it("deduplicates protocol contacts and backfills placeholder conversation titles", async () => {
+    const store = await SqliteStore.open(tempDb());
+    await store.setActiveAccount(accountA);
     const sparseContact: ContactInput = {
       id: "contact:public:sparse",
       protocolId: "@public",
@@ -646,8 +705,8 @@ describe("SqliteStore", () => {
     const sparseConversation = conversationFromContact(sparseContact);
     const richConversation = conversationFromContact(richContact);
 
-    store.upsertContact(sparseContact);
-    store.saveMessage(
+    await store.upsertContact(sparseContact);
+    await store.saveMessage(
       {
         id: localMessageId([sparseConversation.id, "first"]),
         conversationId: sparseConversation.id,
@@ -661,23 +720,23 @@ describe("SqliteStore", () => {
       sparseConversation,
       true
     );
-    store.upsertContact(richContact);
-    store.upsertConversation(richConversation);
+    await store.upsertContact(richContact);
+    await store.upsertConversation(richConversation);
 
-    const contacts = store.listContacts("public", 10);
+    const contacts = await store.listContacts("public", 10);
     expect(contacts.map((contact) => contact.displayName)).toEqual(["Public Account"]);
-    const conversations = store.listRecentConversations(10);
+    const conversations = await store.listRecentConversations(10);
     expect(conversations.map((conversation) => conversation.protocolId)).toEqual(["@public"]);
     expect(conversations[0]?.title).toBe("Public Account");
-    expect(store.listMessages(sparseConversation.id)[0]?.senderName).toBe("Public Account");
-    expect(store.totalUnreadCount()).toBe(0);
-    expect(store.listUnreadConversations()).toHaveLength(0);
-    store.close();
+    expect((await store.listMessages(sparseConversation.id))[0]?.senderName).toBe("Public Account");
+    expect(await store.totalUnreadCount()).toBe(0);
+    expect(await store.listUnreadConversations()).toHaveLength(0);
+    await store.close();
   });
 
-  it("lazily merges stale private conversations into the current contact conversation", () => {
-    const store = new SqliteStore(tempDb());
-    store.setActiveAccount(accountA);
+  it("lazily merges stale private conversations into the current contact conversation", async () => {
+    const store = await SqliteStore.open(tempDb());
+    await store.setActiveAccount(accountA);
     const staleContact: ContactInput = {
       id: contactId("private", ["@old-one"]),
       protocolId: "@old-one",
@@ -693,8 +752,8 @@ describe("SqliteStore", () => {
     };
     const staleConversation = conversationFromContact(staleContact);
 
-    store.upsertContact(staleContact);
-    store.saveMessage(
+    await store.upsertContact(staleContact);
+    await store.saveMessage(
       {
         id: localMessageId([staleConversation.id, "old"]),
         conversationId: staleConversation.id,
@@ -709,27 +768,27 @@ describe("SqliteStore", () => {
       true
     );
 
-    store.markAllContactsStale();
-    const current = store.upsertContact(currentContact);
-    const currentConversation = store.upsertConversation(conversationFromContact(currentContact));
-    const merged = store.mergeStaleConversationForContact(current, currentConversation);
+    await store.markAllContactsStale();
+    const current = await store.upsertContact(currentContact);
+    const currentConversation = await store.upsertConversation(conversationFromContact(currentContact));
+    const merged = await store.mergeStaleConversationForContact(current, currentConversation);
 
     expect(merged.id).toBe(currentConversation.id);
     expect(merged.protocolId).toBe("@new-one");
     expect(merged.lastMessagePreview).toBe("old message");
-    expect(store.findConversationById(staleConversation.id)).toBeUndefined();
-    expect(store.listRecentConversations().filter((conversation) => conversation.title === "Test Contact")).toHaveLength(1);
-    expect(store.listMessages(staleConversation.id)).toHaveLength(0);
-    const messages = store.listMessages(currentConversation.id);
+    expect(await store.findConversationById(staleConversation.id)).toBeUndefined();
+    expect((await store.listRecentConversations()).filter((conversation) => conversation.title === "Test Contact")).toHaveLength(1);
+    expect(await store.listMessages(staleConversation.id)).toHaveLength(0);
+    const messages = await store.listMessages(currentConversation.id);
     expect(messages).toHaveLength(1);
     expect(messages[0]?.senderId).toBe(current.id);
-    expect(store.totalUnreadCount()).toBe(1);
-    store.close();
+    expect(await store.totalUnreadCount()).toBe(1);
+    await store.close();
   });
 
-  it("lazily merges stale group conversations into the current group conversation", () => {
-    const store = new SqliteStore(tempDb());
-    store.setActiveAccount(accountA);
+  it("lazily merges stale group conversations into the current group conversation", async () => {
+    const store = await SqliteStore.open(tempDb());
+    await store.setActiveAccount(accountA);
     const staleGroup: ContactInput = {
       id: contactId("group", ["@@old-group"]),
       protocolId: "@@old-group",
@@ -751,9 +810,9 @@ describe("SqliteStore", () => {
     };
     const staleConversation = conversationFromContact(staleGroup);
 
-    store.upsertContact(staleGroup);
-    store.upsertContact(sender);
-    store.saveMessage(
+    await store.upsertContact(staleGroup);
+    await store.upsertContact(sender);
+    await store.saveMessage(
       {
         id: localMessageId([staleConversation.id, "old group"]),
         conversationId: staleConversation.id,
@@ -768,27 +827,27 @@ describe("SqliteStore", () => {
       true
     );
 
-    store.markAllContactsStale();
-    const current = store.upsertContact(currentGroup);
-    const currentConversation = store.upsertConversation(conversationFromContact(currentGroup));
-    const merged = store.mergeStaleConversationForContact(current, currentConversation);
+    await store.markAllContactsStale();
+    const current = await store.upsertContact(currentGroup);
+    const currentConversation = await store.upsertConversation(conversationFromContact(currentGroup));
+    const merged = await store.mergeStaleConversationForContact(current, currentConversation);
 
     expect(merged.id).toBe(currentConversation.id);
     expect(merged.protocolId).toBe("@@new-group");
     expect(merged.lastMessagePreview).toBe("old group message");
-    expect(store.findConversationById(staleConversation.id)).toBeUndefined();
-    expect(store.listRecentConversations().filter((conversation) => conversation.title === "Project Group")).toHaveLength(1);
-    expect(store.listMessages(staleConversation.id)).toHaveLength(0);
-    const messages = store.listMessages(currentConversation.id);
+    expect(await store.findConversationById(staleConversation.id)).toBeUndefined();
+    expect((await store.listRecentConversations()).filter((conversation) => conversation.title === "Project Group")).toHaveLength(1);
+    expect(await store.listMessages(staleConversation.id)).toHaveLength(0);
+    const messages = await store.listMessages(currentConversation.id);
     expect(messages).toHaveLength(1);
     expect(messages[0]?.senderId).toBe(sender.id);
-    expect(store.totalUnreadCount()).toBe(1);
-    store.close();
+    expect(await store.totalUnreadCount()).toBe(1);
+    await store.close();
   });
 
-  it("does not merge stale group conversations when member counts differ", () => {
-    const store = new SqliteStore(tempDb());
-    store.setActiveAccount(accountA);
+  it("does not merge stale group conversations when member counts differ", async () => {
+    const store = await SqliteStore.open(tempDb());
+    await store.setActiveAccount(accountA);
     const staleGroup: ContactInput = {
       id: contactId("group", ["@@old-count-group"]),
       protocolId: "@@old-count-group",
@@ -805,8 +864,8 @@ describe("SqliteStore", () => {
     const staleConversation = conversationFromContact(staleGroup);
     const currentConversationInput = conversationFromContact(currentGroup);
 
-    store.upsertContact(staleGroup);
-    store.saveMessage(
+    await store.upsertContact(staleGroup);
+    await store.saveMessage(
       {
         id: localMessageId([staleConversation.id, "old counted group"]),
         conversationId: staleConversation.id,
@@ -821,20 +880,20 @@ describe("SqliteStore", () => {
       true
     );
 
-    store.markAllContactsStale();
-    const current = store.upsertContact(currentGroup);
-    const currentConversation = store.upsertConversation(currentConversationInput);
-    const merged = store.mergeStaleConversationForContact(current, currentConversation);
+    await store.markAllContactsStale();
+    const current = await store.upsertContact(currentGroup);
+    const currentConversation = await store.upsertConversation(currentConversationInput);
+    const merged = await store.mergeStaleConversationForContact(current, currentConversation);
 
     expect(merged.id).toBe(currentConversation.id);
-    expect(store.findConversationById(staleConversation.id)).toBeDefined();
-    expect(store.listRecentConversations().filter((conversation) => conversation.title === "Counted Group")).toHaveLength(2);
-    store.close();
+    expect(await store.findConversationById(staleConversation.id)).toBeDefined();
+    expect((await store.listRecentConversations()).filter((conversation) => conversation.title === "Counted Group")).toHaveLength(2);
+    await store.close();
   });
 
-  it("folds stale private conversations in recent and unread lists", () => {
-    const store = new SqliteStore(tempDb());
-    store.setActiveAccount(accountA);
+  it("folds stale private conversations in recent and unread lists", async () => {
+    const store = await SqliteStore.open(tempDb());
+    await store.setActiveAccount(accountA);
     const staleContact: ContactInput = {
       id: contactId("private", ["@old-folded"]),
       protocolId: "@old-folded",
@@ -851,8 +910,8 @@ describe("SqliteStore", () => {
     const staleConversation = conversationFromContact(staleContact);
     const currentConversation = conversationFromContact(currentContact);
 
-    store.upsertContact(staleContact);
-    store.saveMessage(
+    await store.upsertContact(staleContact);
+    await store.saveMessage(
       {
         id: localMessageId([staleConversation.id, "old folded"]),
         conversationId: staleConversation.id,
@@ -866,9 +925,9 @@ describe("SqliteStore", () => {
       staleConversation,
       true
     );
-    store.markAllContactsStale();
-    store.upsertContact(currentContact);
-    store.saveMessage(
+    await store.markAllContactsStale();
+    await store.upsertContact(currentContact);
+    await store.saveMessage(
       {
         id: localMessageId([currentConversation.id, "new folded"]),
         conversationId: currentConversation.id,
@@ -883,18 +942,18 @@ describe("SqliteStore", () => {
       true
     );
 
-    const recent = store.listRecentConversations().filter((conversation) => conversation.title === "Folded Friend");
+    const recent = (await store.listRecentConversations()).filter((conversation) => conversation.title === "Folded Friend");
     expect(recent).toHaveLength(1);
     expect(recent[0]?.id).toBe(currentConversation.id);
     expect(recent[0]?.unreadCount).toBe(2);
     expect(recent[0]?.lastMessagePreview).toBe("new folded");
-    expect(store.listUnreadConversations().filter((conversation) => conversation.title === "Folded Friend")).toHaveLength(1);
-    store.close();
+    expect((await store.listUnreadConversations()).filter((conversation) => conversation.title === "Folded Friend")).toHaveLength(1);
+    await store.close();
   });
 
-  it("folds stale group conversations in recent and unread lists", () => {
-    const store = new SqliteStore(tempDb());
-    store.setActiveAccount(accountA);
+  it("folds stale group conversations in recent and unread lists", async () => {
+    const store = await SqliteStore.open(tempDb());
+    await store.setActiveAccount(accountA);
     const staleGroup: ContactInput = {
       id: contactId("group", ["@@old-folded-group"]),
       protocolId: "@@old-folded-group",
@@ -911,8 +970,8 @@ describe("SqliteStore", () => {
     const staleConversation = conversationFromContact(staleGroup);
     const currentConversation = conversationFromContact(currentGroup);
 
-    store.upsertContact(staleGroup);
-    store.saveMessage(
+    await store.upsertContact(staleGroup);
+    await store.saveMessage(
       {
         id: localMessageId([staleConversation.id, "old group folded"]),
         conversationId: staleConversation.id,
@@ -926,9 +985,9 @@ describe("SqliteStore", () => {
       staleConversation,
       true
     );
-    store.markAllContactsStale();
-    store.upsertContact(currentGroup);
-    store.saveMessage(
+    await store.markAllContactsStale();
+    await store.upsertContact(currentGroup);
+    await store.saveMessage(
       {
         id: localMessageId([currentConversation.id, "new group folded"]),
         conversationId: currentConversation.id,
@@ -943,17 +1002,17 @@ describe("SqliteStore", () => {
       true
     );
 
-    const recent = store.listRecentConversations().filter((conversation) => conversation.title === "Folded Group");
+    const recent = (await store.listRecentConversations()).filter((conversation) => conversation.title === "Folded Group");
     expect(recent).toHaveLength(1);
     expect(recent[0]?.id).toBe(currentConversation.id);
     expect(recent[0]?.unreadCount).toBe(2);
     expect(recent[0]?.lastMessagePreview).toBe("new group folded");
-    expect(store.listUnreadConversations().filter((conversation) => conversation.title === "Folded Group")).toHaveLength(1);
-    store.close();
+    expect((await store.listUnreadConversations()).filter((conversation) => conversation.title === "Folded Group")).toHaveLength(1);
+    await store.close();
   });
 
-  it("isolates contacts, conversations, messages, and unread counts by active account", () => {
-    const store = new SqliteStore(tempDb());
+  it("isolates contacts, conversations, messages, and unread counts by active account", async () => {
+    const store = await SqliteStore.open(tempDb());
     const baseContactId = contactId("private", ["shared-contact"]);
     const contactA: ContactInput = {
       id: `${accountA.id}:${baseContactId}`,
@@ -969,9 +1028,9 @@ describe("SqliteStore", () => {
     const conversationA = conversationFromContact(contactA);
     const conversationB = conversationFromContact(contactB);
 
-    store.setActiveAccount(accountA);
-    store.upsertContact(contactA);
-    store.saveMessage(
+    await store.setActiveAccount(accountA);
+    await store.upsertContact(contactA);
+    await store.saveMessage(
       {
         id: localMessageId([accountA.id, conversationA.id, "account-a-message"]),
         conversationId: conversationA.id,
@@ -986,14 +1045,14 @@ describe("SqliteStore", () => {
       true
     );
 
-    store.setActiveAccount(accountB);
-    expect(store.findContactByName("Shared Name")).toBeUndefined();
-    expect(store.listRecentConversations()).toHaveLength(0);
-    expect(store.searchMessages("account a")).toHaveLength(0);
-    expect(store.totalUnreadCount()).toBe(0);
+    await store.setActiveAccount(accountB);
+    expect(await store.findContactByName("Shared Name")).toBeUndefined();
+    expect(await store.listRecentConversations()).toHaveLength(0);
+    expect(await store.searchMessages("account a")).toHaveLength(0);
+    expect(await store.totalUnreadCount()).toBe(0);
 
-    store.upsertContact(contactB);
-    store.saveMessage(
+    await store.upsertContact(contactB);
+    await store.saveMessage(
       {
         id: localMessageId([accountB.id, conversationB.id, "account-b-message"]),
         conversationId: conversationB.id,
@@ -1008,16 +1067,16 @@ describe("SqliteStore", () => {
       true
     );
 
-    expect(store.findContactByName("Shared Name B")?.displayName).toBe("Shared Name B");
-    expect(store.searchMessages("account b")).toHaveLength(1);
-    expect(store.searchMessages("account a")).toHaveLength(0);
-    expect(store.totalUnreadCount()).toBe(1);
+    expect((await store.findContactByName("Shared Name B"))?.displayName).toBe("Shared Name B");
+    expect(await store.searchMessages("account b")).toHaveLength(1);
+    expect(await store.searchMessages("account a")).toHaveLength(0);
+    expect(await store.totalUnreadCount()).toBe(1);
 
-    store.setActiveAccount(accountA);
-    expect(store.findContactByName("Shared Name")?.displayName).toBe("Shared Name");
-    expect(store.searchMessages("account a")).toHaveLength(1);
-    expect(store.searchMessages("account b")).toHaveLength(0);
-    expect(store.totalUnreadCount()).toBe(1);
-    store.close();
+    await store.setActiveAccount(accountA);
+    expect((await store.findContactByName("Shared Name"))?.displayName).toBe("Shared Name");
+    expect(await store.searchMessages("account a")).toHaveLength(1);
+    expect(await store.searchMessages("account b")).toHaveLength(0);
+    expect(await store.totalUnreadCount()).toBe(1);
+    await store.close();
   });
 });

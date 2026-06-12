@@ -42,4 +42,12 @@ describe("path input helpers", () => {
 
     expect(imageFilePathFromPastedText(pathToFileURL(imagePath).href)).toBe(imagePath);
   });
+
+  it("does not touch the filesystem when parsing pasted image paths", () => {
+    const dir = mkdtempSync(join(tmpdir(), "wechat-tui-path-"));
+    tempDirs.push(dir);
+    const imagePath = join(dir, "not-yet-created.png");
+
+    expect(imageFilePathFromPastedText(imagePath)).toBe(imagePath);
+  });
 });

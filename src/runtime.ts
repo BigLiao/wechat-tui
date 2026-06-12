@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { existsSync, writeFileSync, rmSync, readdirSync } from "node:fs";
+import { access, readdir, rm, writeFile } from "node:fs/promises";
 import { basename, extname, join } from "node:path";
 import { homedir } from "node:os";
 import type { Logger } from "pino";
@@ -52,6 +52,7 @@ export interface RuntimeOptions {
 
 const SEARCH_ENTER_SUPPRESSION_MS = 100;
 const STARTUP_FRAME_MS = 160;
+const RENDER_DEBOUNCE_MS = 8;
 
 export class WeChatRuntime extends EventEmitter {
   private view: AppView = "login";
@@ -77,6 +78,12 @@ export class WeChatRuntime extends EventEmitter {
   private contactSnapshotApplied = false;
   private suppressSearchEnterUntil = 0;
   private renderScheduled = false;
+  private rendering = false;
+  private renderAgain = false;
+  private renderPromise: Promise<void> | undefined;
+  private protocolEventQueue: Promise<void> = Promise.resolve();
+  private pendingProtocolEvents = 0;
+  private protocolBatchRenderRequested = false;
   private startupActive = false;
   private startupFrame = 0;
   private startupMessage = "Opening WeChat TUI...";
@@ -110,22 +117,23 @@ export class WeChatRuntime extends EventEmitter {
         }
       }
     );
-    const sessionData = this.store.getSessionData();
+    const sessionData = await this.store.getSessionData();
     this.pendingStoredSessionStartup = sessionData !== undefined;
     this.statusMessage = sessionData ? "Checking saved WeChat session..." : "Waiting for WeChat login...";
     this.startUpdateCheck();
-    this.render();
+    await this.render();
     try {
       await this.protocol.start(sessionData);
       if (this.startupActive) {
         await waitForMinimumStartup(this.startupStartedAt, this.options.minimumStartupMs ?? 0);
       }
+      await this.protocolEventQueue;
     } finally {
       this.pendingStoredSessionStartup = false;
       this.stopStartupAnimation();
     }
     this.options.logger?.info("runtime start completed");
-    this.render();
+    await this.render();
   }
 
   async handleUiEvent(event: UiEvent): Promise<void> {
@@ -136,9 +144,9 @@ export class WeChatRuntime extends EventEmitter {
 
     if (event.type === "conversation-select") {
       if (!this.exiting && this.view === "chats") {
-        const conversations = this.listVisibleConversations();
+        const conversations = await this.listVisibleConversations();
         this.selectedConversationIndex = clampSelection(event.index, conversations.length + 1);
-        this.render();
+        await this.render();
       }
       return;
     }
@@ -146,11 +154,11 @@ export class WeChatRuntime extends EventEmitter {
     if (event.type === "conversation-open") {
       if (!this.exiting && this.view === "chats") {
         if (event.conversationId) {
-          this.openConversationById(event.conversationId);
+          await this.openConversationById(event.conversationId);
         } else {
           this.enterContactSearch("chats");
         }
-        this.render();
+        await this.render();
       }
       return;
     }
@@ -173,7 +181,7 @@ export class WeChatRuntime extends EventEmitter {
       this.errorMessage = error instanceof Error ? error.message : String(error);
     } finally {
       if (!this.exiting) {
-        this.render();
+        await this.render();
       }
     }
   }
@@ -215,7 +223,7 @@ export class WeChatRuntime extends EventEmitter {
       this.errorMessage = error instanceof Error ? error.message : String(error);
     } finally {
       if (!this.exiting) {
-        this.render();
+        await this.render();
       }
     }
   }
@@ -227,7 +235,7 @@ export class WeChatRuntime extends EventEmitter {
       if (state === "reconnecting") {
         this.statusMessage = "reconnecting...";
       }
-      this.render();
+      void this.render();
     });
 
     this.protocol.on("qr", (event) => {
@@ -236,72 +244,29 @@ export class WeChatRuntime extends EventEmitter {
       this.qr = event;
       this.view = "login";
       this.statusMessage = "Scan the QR code with WeChat.";
-      this.render();
+      void this.render();
     });
 
     this.protocol.on("scan", () => {
       this.options.logger?.info("login QR scanned");
       this.statusMessage = "QR scanned. Confirm login on your phone.";
-      this.render();
+      void this.render();
     });
 
     this.protocol.on("login", (user) => {
-      const showStartup = this.pendingStoredSessionStartup;
-      this.pendingStoredSessionStartup = false;
-      this.activateAccount(user);
-      this.accountName = user.displayName;
-      this.qr = undefined;
-      this.view = "chats";
-      this.statusMessage = `connected as ${user.displayName}`;
-      this.persistSessionData();
-      this.options.logger?.info(
-        { user: { id: user.id, protocolId: user.protocolId, displayName: user.displayName } },
-        "runtime login event"
-      );
-      if (showStartup) {
-        this.startStartupAnimation("Loading your WeChat workspace...");
-      }
-      this.render();
+      this.enqueueProtocolEvent(() => this.handleProtocolLogin(user));
     });
 
     this.protocol.on("contacts", (contacts) => {
-      this.options.logger?.debug(summarizeContacts(contacts), "runtime received contacts");
-      if (!this.ensureActiveAccount("contacts")) {
-        this.options.logger?.warn({ count: contacts.length }, "dropping contacts received before account is known");
-        return;
-      }
-      // First contacts event after login = snapshot: mark all existing contacts stale
-      if (!this.contactSnapshotApplied) {
-        this.contactSnapshotApplied = true;
-        this.store.markAllContactsStale();
-        this.options.logger?.info({ count: contacts.length }, "applying contact snapshot (marked existing as stale)");
-      }
-      this.store.upsertContacts(contacts.map((contact) => this.scopeContact(contact)));
-      this.persistSessionData();
-      if (this.view === "search") {
-        this.clampSearchSelection();
-      }
-      this.render();
+      this.enqueueProtocolEvent(() => this.handleProtocolContacts(contacts));
     });
 
     this.protocol.on("message", (message) => {
-      this.options.logger?.debug({ message: summarizeIncomingMessage(message) }, "runtime received protocol message");
-      if (!this.ensureActiveAccount("message")) {
-        this.options.logger?.warn({ message: summarizeIncomingMessage(message) }, "dropping message received before account is known");
-        return;
-      }
-      if (this.handleIncomingMessage(message)) {
-        this.scheduleRender();
-      }
+      this.enqueueProtocolEvent(() => this.handleProtocolMessage(message));
     });
 
     this.protocol.on("logout", () => {
-      this.connectionState = "logout";
-      this.accountName = undefined;
-      this.activeAccountId = undefined;
-      this.store.clearActiveAccount();
-      this.statusMessage = "logged out. Use q to quit.";
-      this.render();
+      this.enqueueProtocolEvent(() => this.handleProtocolLogout());
     });
 
     this.protocol.on("error", (error) => {
@@ -309,14 +274,112 @@ export class WeChatRuntime extends EventEmitter {
       this.errorMessage = error.message;
       this.statusMessage = "Use q to quit, or restart the CLI to reconnect.";
       this.options.logger?.error({ err: error }, "runtime protocol error");
-      this.render();
+      void this.render();
     });
   }
 
-  private activateAccount(user: UserProfile): void {
+  private enqueueProtocolEvent(task: () => Promise<void>): void {
+    this.pendingProtocolEvents += 1;
+    const run = async () => {
+      try {
+        await task();
+      } finally {
+        this.pendingProtocolEvents -= 1;
+        if (this.pendingProtocolEvents === 0 && this.protocolBatchRenderRequested) {
+          this.protocolBatchRenderRequested = false;
+          this.scheduleRender();
+        }
+      }
+    };
+    this.protocolEventQueue = this.protocolEventQueue.then(run, run);
+    void this.protocolEventQueue.catch((error: unknown) => {
+      this.options.logger?.error({ err: error }, "protocol event queue failed");
+      this.errorMessage = error instanceof Error ? error.message : String(error);
+      void this.render();
+    });
+  }
+
+  private async handleProtocolLogin(user: UserProfile): Promise<void> {
+    try {
+      const showStartup = this.pendingStoredSessionStartup;
+      this.pendingStoredSessionStartup = false;
+      await this.activateAccount(user);
+      this.accountName = user.displayName;
+      this.qr = undefined;
+      this.view = "chats";
+      this.statusMessage = `connected as ${user.displayName}`;
+      await this.persistSessionData();
+      this.options.logger?.info(
+        { user: { id: user.id, protocolId: user.protocolId, displayName: user.displayName } },
+        "runtime login event"
+      );
+      if (showStartup) {
+        this.startStartupAnimation("Loading your WeChat workspace...");
+      }
+      void this.render();
+    } catch (error) {
+      this.options.logger?.error({ err: error }, "failed to handle protocol login");
+      this.errorMessage = error instanceof Error ? error.message : String(error);
+      void this.render();
+    }
+  }
+
+  private async handleProtocolContacts(contacts: ContactInput[]): Promise<void> {
+    try {
+      this.options.logger?.debug(summarizeContacts(contacts), "runtime received contacts");
+      if (!(await this.ensureActiveAccount("contacts"))) {
+        this.options.logger?.warn({ count: contacts.length }, "dropping contacts received before account is known");
+        return;
+      }
+      // First contacts event after login = snapshot: mark all existing contacts stale
+      if (!this.contactSnapshotApplied) {
+        this.contactSnapshotApplied = true;
+        await this.store.markAllContactsStale();
+        this.options.logger?.info({ count: contacts.length }, "applying contact snapshot (marked existing as stale)");
+      }
+      await this.store.upsertContacts(contacts.map((contact) => this.scopeContact(contact)));
+      await this.persistSessionData();
+      if (this.view === "search") {
+        await this.clampSearchSelection();
+      }
+      void this.render();
+    } catch (error) {
+      this.options.logger?.error({ err: error, count: contacts.length }, "failed to handle protocol contacts");
+      this.errorMessage = error instanceof Error ? error.message : String(error);
+      void this.render();
+    }
+  }
+
+  private async handleProtocolMessage(message: IncomingProtocolMessage): Promise<void> {
+    try {
+      this.options.logger?.debug({ message: summarizeIncomingMessage(message) }, "runtime received protocol message");
+      if (!(await this.ensureActiveAccount("message"))) {
+        this.options.logger?.warn({ message: summarizeIncomingMessage(message) }, "dropping message received before account is known");
+        return;
+      }
+      if (await this.handleIncomingMessage(message)) {
+        this.scheduleProtocolBatchRender();
+      }
+    } catch (error) {
+      this.options.logger?.error({ err: error, message: summarizeIncomingMessage(message) }, "failed to handle protocol message");
+      this.errorMessage = error instanceof Error ? error.message : String(error);
+      void this.render();
+    }
+  }
+
+  private async handleProtocolLogout(): Promise<void> {
+    this.connectionState = "logout";
+    this.accountName = undefined;
+    this.activeAccountId = undefined;
+    this.store.clearActiveAccount();
+    this.statusMessage = "logged out. Use q to quit.";
+    void this.render();
+  }
+
+  private async activateAccount(user: UserProfile): Promise<void> {
     const previousAccountId = this.activeAccountId;
     this.activeAccountId = user.id;
-    this.store.setActiveAccount(user);
+    await this.store.setActiveAccount(user);
     if (previousAccountId && previousAccountId !== user.id) {
       this.activeConversationId = undefined;
       this.selectedConversationIndex = 0;
@@ -333,7 +396,7 @@ export class WeChatRuntime extends EventEmitter {
     }
   }
 
-  private ensureActiveAccount(reason: string): boolean {
+  private async ensureActiveAccount(reason: string): Promise<boolean> {
     if (this.activeAccountId) {
       return true;
     }
@@ -342,7 +405,7 @@ export class WeChatRuntime extends EventEmitter {
       this.options.logger?.warn({ reason }, "protocol event arrived before current account is known");
       return false;
     }
-    this.activateAccount(user);
+    await this.activateAccount(user);
     return true;
   }
 
@@ -390,12 +453,12 @@ export class WeChatRuntime extends EventEmitter {
       return;
     }
     if (key.name === "command-clear") {
-      this.clearAppData();
+      await this.clearAppData();
       return;
     }
     if (key.name === "command-logout") {
       await this.protocol.logout();
-      this.store.clearSessionData();
+      await this.store.clearSessionData();
       this.requestExit();
       return;
     }
@@ -408,26 +471,26 @@ export class WeChatRuntime extends EventEmitter {
       return;
     }
     if (isEnterKey(key)) {
-      this.openSelectedConversation();
+      await this.openSelectedConversation();
       return;
     }
     if (isUpKey(key)) {
-      this.moveConversationSelection(-1);
+      await this.moveConversationSelection(-1);
       return;
     }
     if (isDownKey(key)) {
-      this.moveConversationSelection(1);
+      await this.moveConversationSelection(1);
       return;
     }
   }
 
   private async handleChatKey(key: UiKey): Promise<void> {
     if (this.selectedSwitcherConversationId) {
-      this.handleConversationSwitcherKey(key);
+      await this.handleConversationSwitcherKey(key);
       return;
     }
     if (isTabKey(key)) {
-      this.cycleConversationSwitcher();
+      await this.cycleConversationSwitcher();
       return;
     }
     if (isEscapeKey(key)) {
@@ -476,11 +539,11 @@ export class WeChatRuntime extends EventEmitter {
       return;
     }
     if (isUpKey(key)) {
-      this.moveSearchSelection(-1);
+      await this.moveSearchSelection(-1);
       return;
     }
     if (isDownKey(key)) {
-      this.moveSearchSelection(1);
+      await this.moveSearchSelection(1);
       return;
     }
     if (isEnterKey(key)) {
@@ -489,19 +552,19 @@ export class WeChatRuntime extends EventEmitter {
         return;
       }
       this.suppressSearchEnterUntil = 0;
-      this.openSelectedSearchResult();
+      await this.openSelectedSearchResult();
       return;
     }
     if (isBackspaceKey(key)) {
       this.searchKeyword = this.searchKeyword.slice(0, -1);
-      this.clampSearchSelection();
+      await this.clampSearchSelection();
       return;
     }
 
     const text = printableText(key);
     if (text) {
       this.searchKeyword += text;
-      this.clampSearchSelection();
+      await this.clampSearchSelection();
     }
   }
 
@@ -529,12 +592,12 @@ export class WeChatRuntime extends EventEmitter {
       }
       case "/view": {
         const hash = command.slice(name.length).trim();
-        this.viewFileByHash(hash);
+        await this.viewFileByHash(hash);
         return;
       }
       case "/logout":
         await this.protocol.logout();
-        this.store.clearSessionData();
+        await this.store.clearSessionData();
         this.requestExit();
         return;
       case "/quit":
@@ -545,8 +608,8 @@ export class WeChatRuntime extends EventEmitter {
     }
   }
 
-  private moveConversationSelection(delta: number): void {
-    const conversations = this.listVisibleConversations();
+  private async moveConversationSelection(delta: number): Promise<void> {
+    const conversations = await this.listVisibleConversations();
     // +1 for the "🔍搜索" item at the end
     const totalItems = conversations.length + 1;
     if (totalItems === 0) {
@@ -556,8 +619,8 @@ export class WeChatRuntime extends EventEmitter {
     this.selectedConversationIndex = clamp(this.selectedConversationIndex + delta, 0, totalItems - 1);
   }
 
-  private moveSearchSelection(delta: number): void {
-    const results = this.store.searchContacts(this.searchKeyword, this.options.searchLimit ?? 20);
+  private async moveSearchSelection(delta: number): Promise<void> {
+    const results = await this.store.searchContacts(this.searchKeyword, this.options.searchLimit ?? 20);
     if (results.length === 0) {
       this.selectedSearchIndex = 0;
       return;
@@ -565,8 +628,8 @@ export class WeChatRuntime extends EventEmitter {
     this.selectedSearchIndex = clamp(this.selectedSearchIndex + delta, 0, results.length - 1);
   }
 
-  private openSelectedConversation(): void {
-    const conversations = this.listVisibleConversations();
+  private async openSelectedConversation(): Promise<void> {
+    const conversations = await this.listVisibleConversations();
     // If selected index is beyond the conversation list, it's the "🔍搜索" item
     if (this.selectedConversationIndex >= conversations.length) {
       this.enterContactSearch("chats");
@@ -577,36 +640,37 @@ export class WeChatRuntime extends EventEmitter {
       return;
     }
     const conversation = conversations[clamp(this.selectedConversationIndex, 0, conversations.length - 1)];
-    this.openConversation(conversation);
+    await this.openConversation(conversation);
   }
 
-  private openConversationById(conversationId: string): void {
+  private async openConversationById(conversationId: string): Promise<void> {
+    const visibleConversations = await this.listVisibleConversations();
     const conversation =
-      this.listVisibleConversations().find((item) => item.id === conversationId) ?? this.store.findConversationById(conversationId);
+      visibleConversations.find((item) => item.id === conversationId) ?? await this.store.findConversationById(conversationId);
     if (!conversation) {
       this.errorMessage = "selected conversation is no longer available";
       return;
     }
-    this.selectedConversationIndex = Math.max(0, this.listVisibleConversations().findIndex((item) => item.id === conversation.id));
-    this.openConversation(conversation);
+    this.selectedConversationIndex = Math.max(0, visibleConversations.findIndex((item) => item.id === conversation.id));
+    await this.openConversation(conversation);
   }
 
-  private openSelectedSearchResult(): void {
-    const results = this.store.searchContacts(this.searchKeyword, this.options.searchLimit ?? 20);
+  private async openSelectedSearchResult(): Promise<void> {
+    const results = await this.store.searchContacts(this.searchKeyword, this.options.searchLimit ?? 20);
     if (results.length === 0) {
       this.errorMessage = "no search result selected";
       return;
     }
     const contact = results[clamp(this.selectedSearchIndex, 0, results.length - 1)];
-    const conversation = this.mergeConversationWithContact(
+    const conversation = await this.mergeConversationWithContact(
       contact,
-      this.store.upsertConversation(this.conversationFromStoredContact(contact))
+      await this.store.upsertConversation(this.conversationFromStoredContact(contact))
     );
-    this.openConversation(conversation);
+    await this.openConversation(conversation);
   }
 
-  private openConversation(conversation: ConversationRecord): void {
-    const currentConversation = this.mergeConversationWithCurrentContact(conversation);
+  private async openConversation(conversation: ConversationRecord): Promise<void> {
+    const currentConversation = await this.mergeConversationWithCurrentContact(conversation);
     this.activeConversationId = currentConversation.id;
     this.view = "chat";
     this.previousView = "chats";
@@ -616,7 +680,7 @@ export class WeChatRuntime extends EventEmitter {
     this.messageScrollOffset = 0;
     this.selectedSwitcherConversationId = undefined;
     this.tabReturnConversationId = undefined;
-    this.store.markRead(currentConversation.id);
+    await this.store.markRead(currentConversation.id);
     this.statusMessage = `opened ${currentConversation.title}`;
     this.options.logger?.info(
       { conversationId: currentConversation.id, title: currentConversation.title, kind: currentConversation.kind },
@@ -624,24 +688,24 @@ export class WeChatRuntime extends EventEmitter {
     );
   }
 
-  private mergeConversationWithCurrentContact(conversation: ConversationRecord): ConversationRecord {
-    const contact = this.currentContactForConversation(conversation);
+  private async mergeConversationWithCurrentContact(conversation: ConversationRecord): Promise<ConversationRecord> {
+    const contact = await this.currentContactForConversation(conversation);
     return contact ? this.mergeConversationWithContact(contact, conversation) : conversation;
   }
 
-  private mergeConversationWithContact(contact: ContactRecord, conversation: ConversationRecord): ConversationRecord {
+  private async mergeConversationWithContact(contact: ContactRecord, conversation: ConversationRecord): Promise<ConversationRecord> {
     const currentConversation =
       conversation.id === this.conversationFromStoredContact(contact).id
         ? conversation
-        : this.store.upsertConversation(this.conversationFromStoredContact(contact));
+        : await this.store.upsertConversation(this.conversationFromStoredContact(contact));
     return this.store.mergeStaleConversationForContact(contact, currentConversation);
   }
 
-  private currentContactForConversation(conversation: ConversationRecord): ContactRecord | undefined {
+  private async currentContactForConversation(conversation: ConversationRecord): Promise<ContactRecord | undefined> {
     if (conversation.kind !== "private" && conversation.kind !== "group") {
       return undefined;
     }
-    const contact = this.store.findContactByName(conversation.title);
+    const contact = await this.store.findContactByName(conversation.title);
     if (!contact || contact.kind !== conversation.kind || !contactMatchesConversationTitle(contact, conversation)) {
       return undefined;
     }
@@ -675,9 +739,9 @@ export class WeChatRuntime extends EventEmitter {
     this.messageScrollOffset = Math.max(0, this.messageScrollOffset + delta);
   }
 
-  private handleConversationSwitcherKey(key: UiKey): void {
+  private async handleConversationSwitcherKey(key: UiKey): Promise<void> {
     if (isTabKey(key)) {
-      this.cycleConversationSwitcher();
+      await this.cycleConversationSwitcher();
       return;
     }
     if (isEscapeKey(key)) {
@@ -685,20 +749,20 @@ export class WeChatRuntime extends EventEmitter {
       return;
     }
     if (isLeftKey(key)) {
-      this.moveConversationSwitcher(-1);
+      await this.moveConversationSwitcher(-1);
       return;
     }
     if (isRightKey(key)) {
-      this.moveConversationSwitcher(1);
+      await this.moveConversationSwitcher(1);
       return;
     }
     if (isEnterKey(key)) {
-      this.openSelectedSwitcherConversation();
+      await this.openSelectedSwitcherConversation();
     }
   }
 
-  private cycleConversationSwitcher(): void {
-    const switcherConversations = this.listConversationSwitcherTargets();
+  private async cycleConversationSwitcher(): Promise<void> {
+    const switcherConversations = await this.listConversationSwitcherTargets();
     if (switcherConversations.length === 0) {
       this.exitConversationSwitcher();
       return;
@@ -717,8 +781,8 @@ export class WeChatRuntime extends EventEmitter {
     this.selectSwitcherConversation(switcherConversations[nextIndex]);
   }
 
-  private moveConversationSwitcher(delta: number): void {
-    const switcherConversations = this.listConversationSwitcherTargets();
+  private async moveConversationSwitcher(delta: number): Promise<void> {
+    const switcherConversations = await this.listConversationSwitcherTargets();
     if (switcherConversations.length === 0) {
       this.exitConversationSwitcher("no conversations to switch");
       return;
@@ -732,8 +796,8 @@ export class WeChatRuntime extends EventEmitter {
     this.selectSwitcherConversation(switcherConversations[nextIndex]);
   }
 
-  private openSelectedSwitcherConversation(): void {
-    const switcherConversations = this.listConversationSwitcherTargets();
+  private async openSelectedSwitcherConversation(): Promise<void> {
+    const switcherConversations = await this.listConversationSwitcherTargets();
     const conversation = switcherConversations.find((item) => item.id === this.selectedSwitcherConversationId);
     if (!conversation) {
       this.exitConversationSwitcher("no conversations to switch");
@@ -742,7 +806,7 @@ export class WeChatRuntime extends EventEmitter {
     const returnConversationId = this.activeConversationId && this.activeConversationId !== conversation.id
       ? this.activeConversationId
       : undefined;
-    this.openConversation(conversation);
+    await this.openConversation(conversation);
     this.tabReturnConversationId = returnConversationId;
   }
 
@@ -756,8 +820,8 @@ export class WeChatRuntime extends EventEmitter {
     this.statusMessage = statusMessage;
   }
 
-  private listVisibleConversations(): ConversationRecord[] {
-    const conversations = foldPublicConversations(this.store.listRecentConversations(this.options.conversationListLimit ?? 20));
+  private async listVisibleConversations(): Promise<ConversationRecord[]> {
+    const conversations = foldPublicConversations(await this.store.listRecentConversations(this.options.conversationListLimit ?? 20));
     const query = this.conversationQuery.trim().toLocaleLowerCase();
     if (!query || query.startsWith("/")) {
       return conversations;
@@ -778,15 +842,15 @@ export class WeChatRuntime extends EventEmitter {
   }
 
   private async sendToActiveConversation(text: string): Promise<void> {
-    let activeConversation = this.getActiveConversation();
+    let activeConversation = await this.getActiveConversation();
     if (!activeConversation) {
       this.errorMessage = "no active conversation";
       return;
     }
-    activeConversation = this.mergeConversationWithCurrentContact(activeConversation);
+    activeConversation = await this.mergeConversationWithCurrentContact(activeConversation);
     this.activeConversationId = activeConversation.id;
     // Resolve the current protocol ID: prefer a fresh lookup from active contacts
-    const protocolId = this.resolveCurrentProtocolId(activeConversation);
+    const protocolId = await this.resolveCurrentProtocolId(activeConversation);
     if (!protocolId) {
       this.errorMessage = "active conversation has no current protocol id";
       return;
@@ -817,10 +881,10 @@ export class WeChatRuntime extends EventEmitter {
         timestamp: now,
         raw: sent.raw
       };
-      const saved = this.store.saveMessage(message, conversationInputFromRecord(activeConversation), false);
-      this.store.markRead(activeConversation.id);
+      const saved = await this.store.saveMessage(message, conversationInputFromRecord(activeConversation), false);
+      await this.store.markRead(activeConversation.id);
       this.messageScrollOffset = 0;
-      this.persistSessionData();
+      await this.persistSessionData();
       this.statusMessage = "message sent";
       this.options.logger?.info(
         { conversationId: activeConversation.id, sentMessageId: sent.messageId, message: summarizeStoredMessage(saved) },
@@ -837,21 +901,21 @@ export class WeChatRuntime extends EventEmitter {
       this.errorMessage = "usage: /send <file-path>";
       return;
     }
-    let activeConversation = this.getActiveConversation();
+    let activeConversation = await this.getActiveConversation();
     if (!activeConversation) {
       this.errorMessage = "no active conversation";
       return;
     }
-    activeConversation = this.mergeConversationWithCurrentContact(activeConversation);
+    activeConversation = await this.mergeConversationWithCurrentContact(activeConversation);
     this.activeConversationId = activeConversation.id;
-    const protocolId = this.resolveCurrentProtocolId(activeConversation);
+    const protocolId = await this.resolveCurrentProtocolId(activeConversation);
     if (!protocolId) {
       this.errorMessage = "active conversation has no current protocol id";
       return;
     }
 
     const filePath = normalizeUserFilePath(rawPath);
-    if (!existsSync(filePath)) {
+    if (!(await fileExists(filePath))) {
       this.errorMessage = `file not found: ${filePath}`;
       return;
     }
@@ -880,10 +944,10 @@ export class WeChatRuntime extends EventEmitter {
         timestamp: now,
         raw: { ...asObject(sent.raw), localFilePath: filePath }
       };
-      const saved = this.store.saveMessage(message, conversationInputFromRecord(activeConversation), false);
-      this.store.markRead(activeConversation.id);
+      const saved = await this.store.saveMessage(message, conversationInputFromRecord(activeConversation), false);
+      await this.store.markRead(activeConversation.id);
       this.messageScrollOffset = 0;
-      this.persistSessionData();
+      await this.persistSessionData();
       this.statusMessage = `${type} sent: ${filename}`;
       this.options.logger?.info(
         { conversationId: activeConversation.id, sentMessageId: sent.messageId, message: summarizeStoredMessage(saved) },
@@ -895,16 +959,16 @@ export class WeChatRuntime extends EventEmitter {
     }
   }
 
-  private handleIncomingMessage(incoming: IncomingProtocolMessage): boolean {
+  private async handleIncomingMessage(incoming: IncomingProtocolMessage): Promise<boolean> {
     const scopedIncoming = this.scopeIncomingMessage(incoming);
-    if (this.store.hasMessage(scopedIncoming.id)) {
+    if (await this.store.hasMessage(scopedIncoming.id)) {
       this.options.logger?.debug(
         { messageId: scopedIncoming.id, protocolMessageId: scopedIncoming.protocolMessageId },
         "duplicate incoming message skipped"
       );
       return false;
     }
-    let conversationContact = this.store.upsertContact(this.contactFromConversationInput(scopedIncoming.conversation));
+    let conversationContact = await this.store.upsertContact(this.contactFromConversationInput(scopedIncoming.conversation));
     let senderForMessage: { id: string; protocolId?: string; displayName: string } = scopedIncoming.sender;
     let senderKind: MessageInput["senderKind"] = scopedIncoming.isSelf ? "self" : "contact";
     let senderProtocolId = scopedIncoming.sender.protocolId;
@@ -918,7 +982,7 @@ export class WeChatRuntime extends EventEmitter {
         ? this.groupMemberFromSender(scopedIncoming.conversation, scopedIncoming.sender)
         : undefined;
       if (groupMember) {
-        const savedGroupMember = this.store.upsertGroupMember(groupMember);
+        const savedGroupMember = await this.store.upsertGroupMember(groupMember);
         senderForMessage = savedGroupMember;
         senderProtocolId = savedGroupMember.memberProtocolId;
       }
@@ -926,7 +990,7 @@ export class WeChatRuntime extends EventEmitter {
       !senderIsGroupConversation &&
       (scopedIncoming.sender.id !== scopedIncoming.conversation.id || scopedIncoming.conversation.kind !== "group")
     ) {
-      const senderContact = this.store.upsertContact(scopedIncoming.sender);
+      const senderContact = await this.store.upsertContact(scopedIncoming.sender);
       senderForMessage = senderContact;
       senderProtocolId = senderContact.protocolId;
       if (
@@ -937,13 +1001,13 @@ export class WeChatRuntime extends EventEmitter {
         conversationContact = senderContact;
       }
     }
-    const activeConversation = this.getActiveConversation();
+    const activeConversation = await this.getActiveConversation();
     const isActive =
       this.activeConversationId === scopedIncoming.conversation.id ||
       !!activeConversationMatchesInput(activeConversation, scopedIncoming.conversation);
     const isPublic = scopedIncoming.conversation.kind === "public";
     const incrementUnread = !isPublic && !scopedIncoming.isSelf && !isActive;
-    const saved = this.store.saveMessage(
+    const saved = await this.store.saveMessage(
       {
         id: scopedIncoming.id,
         protocolMessageId: scopedIncoming.protocolMessageId,
@@ -961,9 +1025,9 @@ export class WeChatRuntime extends EventEmitter {
       scopedIncoming.conversation,
       incrementUnread
     );
-    const savedConversation = this.store.findConversationById(scopedIncoming.conversation.id);
+    const savedConversation = await this.store.findConversationById(scopedIncoming.conversation.id);
     const mergedConversation =
-      savedConversation && !isPublic ? this.store.mergeStaleConversationForContact(conversationContact, savedConversation) : savedConversation;
+      savedConversation && !isPublic ? await this.store.mergeStaleConversationForContact(conversationContact, savedConversation) : savedConversation;
     if (isActive && mergedConversation) {
       this.activeConversationId = mergedConversation.id;
     }
@@ -971,14 +1035,14 @@ export class WeChatRuntime extends EventEmitter {
     if (isPublic) {
       // Public account updates should be archived without creating unread or status reminders.
     } else if (isActive) {
-      this.store.markRead(mergedConversation?.id ?? scopedIncoming.conversation.id);
+      await this.store.markRead(mergedConversation?.id ?? scopedIncoming.conversation.id);
       this.statusMessage = "new message";
     } else if (this.view === "chat" || this.view === "search") {
       this.statusMessage = `new message from ${scopedIncoming.conversation.title}`;
     } else {
       this.statusMessage = "recent chats updated";
     }
-    this.persistSessionData();
+    await this.persistSessionData();
     this.options.logger?.debug(
       {
         route: isActive ? "active_chat" : this.view === "chat" || this.view === "search" ? "status_only" : "conversation_list",
@@ -1032,13 +1096,13 @@ export class WeChatRuntime extends EventEmitter {
         ? sanitizeFileName(originalName)
         : `${saved.type}_${incoming.protocolMessageId ?? Date.now()}${ext}`;
 
-      const cachePath = this.mediaCache.filePathByName(saved.conversationId, fileName);
-      writeFileSync(cachePath, result.data);
+      const cachePath = await this.mediaCache.filePathByName(saved.conversationId, fileName);
+      await writeFile(cachePath, result.data);
       this.fileRegistry.register(saved.conversationId, saved.id, cachePath);
 
       // Persist localFilePath in the message raw so it survives restarts
       const updatedRaw = { ...asObject(saved.raw), localFilePath: cachePath };
-      this.store.updateMessageRaw(saved.id, updatedRaw);
+      await this.store.updateMessageRaw(saved.id, updatedRaw);
 
       this.options.logger?.info(
         { messageId: saved.id, type: saved.type, cachePath, size: result.data.length },
@@ -1056,10 +1120,18 @@ export class WeChatRuntime extends EventEmitter {
       return;
     }
     this.renderScheduled = true;
-    setImmediate(() => {
+    setTimeout(() => {
       this.renderScheduled = false;
-      this.render();
-    });
+      void this.render();
+    }, RENDER_DEBOUNCE_MS);
+  }
+
+  private scheduleProtocolBatchRender(): void {
+    if (this.pendingProtocolEvents > 0) {
+      this.protocolBatchRenderRequested = true;
+      return;
+    }
+    this.scheduleRender();
   }
 
   private startStartupAnimation(message: string): void {
@@ -1084,9 +1156,9 @@ export class WeChatRuntime extends EventEmitter {
     this.startupActive = false;
   }
 
-  private render(): void {
+  private render(): Promise<void> {
     if (this.exiting) {
-      return;
+      return Promise.resolve();
     }
     if (this.startupActive) {
       this.renderer.render(
@@ -1096,26 +1168,48 @@ export class WeChatRuntime extends EventEmitter {
           debugLogPath: this.options.debugLogPath
         })
       );
-      return;
+      return Promise.resolve();
     }
-    const state = this.buildRenderState();
-    this.renderer.render(state);
+    if (this.rendering) {
+      this.renderAgain = true;
+      return this.renderPromise ?? Promise.resolve();
+    }
+    this.rendering = true;
+    const renderPromise = (async () => {
+      try {
+        do {
+          this.renderAgain = false;
+          const state = await this.buildRenderState();
+          if (!this.exiting && !this.startupActive) {
+            this.renderer.render(state);
+          }
+        } while (this.renderAgain && !this.exiting && !this.startupActive);
+      } catch (error) {
+        this.options.logger?.error({ err: error }, "failed to build render state");
+        this.errorMessage = error instanceof Error ? error.message : String(error);
+      } finally {
+        this.rendering = false;
+        this.renderPromise = undefined;
+      }
+    })();
+    this.renderPromise = renderPromise;
+    return renderPromise;
   }
 
-  private buildRenderState(): RenderState {
-    const conversations = this.listVisibleConversations();
+  private async buildRenderState(): Promise<RenderState> {
+    const conversations = await this.listVisibleConversations();
     // +1 for the "🔍搜索" item at the end of the list
     this.selectedConversationIndex = clampSelection(this.selectedConversationIndex, conversations.length + 1);
-    const activeConversation = this.getActiveConversation();
+    const activeConversation = await this.getActiveConversation();
     const messages = activeConversation
-      ? this.store.listMessages(activeConversation.id, this.activeMessageLimit())
+      ? await this.store.listMessages(activeConversation.id, this.activeMessageLimit())
       : [];
-    const searchResults = this.view === "search" ? this.store.searchContacts(this.searchKeyword, this.options.searchLimit ?? 20) : [];
+    const searchResults = this.view === "search" ? await this.store.searchContacts(this.searchKeyword, this.options.searchLimit ?? 20) : [];
     this.selectedSearchIndex = clampSelection(this.selectedSearchIndex, searchResults.length);
-    const unreadConversations = this.listUnreadConversations();
-    const switcherConversations = this.listConversationSwitcherTargets(unreadConversations);
+    const unreadConversations = await this.listUnreadConversations();
+    const switcherConversations = await this.listConversationSwitcherTargets(unreadConversations);
     this.syncConversationSwitcherSelection(switcherConversations);
-    const totalUnreadCount = this.store.totalUnreadCount();
+    const totalUnreadCount = await this.store.totalUnreadCount();
 
     this.options.logger?.trace(
       {
@@ -1178,16 +1272,17 @@ export class WeChatRuntime extends EventEmitter {
     };
   }
 
-  private listUnreadConversations(): ConversationRecord[] {
-    const unreadConversations = foldPublicConversations(this.store.listUnreadConversations(20));
+  private async listUnreadConversations(): Promise<ConversationRecord[]> {
+    const unreadConversations = foldPublicConversations(await this.store.listUnreadConversations(20));
     return unreadConversations.filter(
       (conversation) => conversation.unreadCount > 0 && conversation.id !== this.activeConversationId
     );
   }
 
-  private listConversationSwitcherTargets(unreadConversations = this.listUnreadConversations()): ConversationRecord[] {
+  private async listConversationSwitcherTargets(unreadConversations?: ConversationRecord[]): Promise<ConversationRecord[]> {
+    unreadConversations ??= await this.listUnreadConversations();
     const targets = [...unreadConversations];
-    const returnConversation = this.tabReturnConversationId ? this.store.findConversationById(this.tabReturnConversationId) : undefined;
+    const returnConversation = this.tabReturnConversationId ? await this.store.findConversationById(this.tabReturnConversationId) : undefined;
     if (
       returnConversation &&
       returnConversation.id !== this.activeConversationId &&
@@ -1211,7 +1306,7 @@ export class WeChatRuntime extends EventEmitter {
     }
   }
 
-  private getActiveConversation(): ConversationRecord | undefined {
+  private async getActiveConversation(): Promise<ConversationRecord | undefined> {
     if (!this.activeConversationId) {
       return undefined;
     }
@@ -1223,8 +1318,8 @@ export class WeChatRuntime extends EventEmitter {
    * After re-login, UserNames change so the stored protocolId may be stale.
    * We look up by title (displayName) in active contacts to find the fresh one.
    */
-  private resolveCurrentProtocolId(conversation: ConversationRecord): string | undefined {
-    return this.currentContactForConversation(conversation)?.protocolId ?? conversation.protocolId;
+  private async resolveCurrentProtocolId(conversation: ConversationRecord): Promise<string | undefined> {
+    return (await this.currentContactForConversation(conversation))?.protocolId ?? conversation.protocolId;
   }
 
   private startUpdateCheck(): void {
@@ -1245,7 +1340,7 @@ export class WeChatRuntime extends EventEmitter {
           },
           "new package version available"
         );
-        this.render();
+        void this.render();
       },
       (error: unknown) => {
         this.options.logger?.debug({ err: error }, "update check failed");
@@ -1302,58 +1397,62 @@ export class WeChatRuntime extends EventEmitter {
     return Math.min(max, base + this.messageScrollOffset + 50);
   }
 
-  private clampSearchSelection(): void {
-    const results = this.store.searchContacts(this.searchKeyword, this.options.searchLimit ?? 20);
+  private async clampSearchSelection(): Promise<void> {
+    const results = await this.store.searchContacts(this.searchKeyword, this.options.searchLimit ?? 20);
     this.selectedSearchIndex = clampSelection(this.selectedSearchIndex, results.length);
   }
 
-  private persistSessionData(): void {
+  private async persistSessionData(): Promise<void> {
     const sessionData = this.protocol.getSessionData();
     if (sessionData !== undefined) {
       this.options.logger?.trace("persisting protocol session data");
-      this.store.setSessionData(sessionData);
+      await this.store.setSessionData(sessionData);
     }
   }
 
-  private clearAppData(): void {
+  private async clearAppData(): Promise<void> {
     this.options.logger?.info("clearing app data (messages, contacts, logs)");
-    this.store.clearData();
-    this.clearLogFiles();
-    this.clearMediaCache();
+    await this.store.clearData();
+    await Promise.all([this.clearLogFiles(), this.clearMediaCache()]);
     this.fileRegistry.clear();
     this.statusMessage = "data cleared";
-    this.render();
+    await this.render();
   }
 
-  private clearLogFiles(): void {
+  private async clearLogFiles(): Promise<void> {
     const logDir = join(homedir(), ".wechat-tui", "logs");
     try {
-      if (!existsSync(logDir)) return;
-      const files = readdirSync(logDir);
+      const files = await readdir(logDir);
       const currentLogPath = this.options.debugLogPath;
-      for (const file of files) {
-        const filePath = join(logDir, file);
-        // Skip the current log file (still in use)
-        if (currentLogPath && filePath === currentLogPath) continue;
-        try { rmSync(filePath); } catch { /* ignore */ }
-      }
+      await Promise.all(
+        files.map(async (file) => {
+          const filePath = join(logDir, file);
+          // Skip the current log file (still in use)
+          if (currentLogPath && filePath === currentLogPath) {
+            return;
+          }
+          try {
+            await rm(filePath);
+          } catch {
+            // Ignore files that disappear while clearing the directory.
+          }
+        })
+      );
     } catch {
       this.options.logger?.debug("failed to clear log directory");
     }
   }
 
-  private clearMediaCache(): void {
+  private async clearMediaCache(): Promise<void> {
     const cacheDir = this.mediaCache.baseDir;
     try {
-      if (existsSync(cacheDir)) {
-        rmSync(cacheDir, { recursive: true, force: true });
-      }
+      await rm(cacheDir, { recursive: true, force: true });
     } catch {
       this.options.logger?.debug("failed to clear media cache directory");
     }
   }
 
-  private viewFileByHash(hash: string): void {
+  private async viewFileByHash(hash: string): Promise<void> {
     if (!hash) {
       this.errorMessage = "usage: /view <hash>";
       return;
@@ -1365,7 +1464,7 @@ export class WeChatRuntime extends EventEmitter {
       this.errorMessage = `no file found for hash: ${normalizedHash}`;
       return;
     }
-    if (!existsSync(filePath)) {
+    if (!(await fileExists(filePath))) {
       this.errorMessage = `file no longer exists: ${filePath}`;
       return;
     }
@@ -1487,6 +1586,15 @@ async function waitForMinimumStartup(startedAt: number, minimumMs: number): Prom
     return;
   }
   await new Promise<void>((resolve) => setTimeout(resolve, remaining));
+}
+
+async function fileExists(filePath: string): Promise<boolean> {
+  try {
+    await access(filePath);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function isEscapeKey(key: UiKey): boolean {

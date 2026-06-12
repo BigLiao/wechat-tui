@@ -40,7 +40,7 @@ async function main(): Promise<void> {
 
   logger?.debug({ config: summarizeConfig(config, logPath) }, "cli config parsed");
 
-  const store = new SqliteStore(config.dbPath, { logger });
+  const store = await SqliteStore.open(config.dbPath, { logger });
   const protocol = config.mock ? new MockProtocol() : new Wechat4uAdapter({ logger });
   const renderer = new WorkbenchTerminalRenderer();
   const runtime = new WeChatRuntime(protocol, store, renderer, {
@@ -61,14 +61,16 @@ async function main(): Promise<void> {
       return;
     }
     closed = true;
-    try {
-      logger?.info({ code }, "shutdown");
-      store.close();
-      renderer.stop();
-      logger?.flush?.();
-    } finally {
-      process.exit(code);
-    }
+    void (async () => {
+      try {
+        logger?.info({ code }, "shutdown");
+        await store.close();
+        renderer.stop();
+        logger?.flush?.();
+      } finally {
+        process.exit(code);
+      }
+    })();
   };
 
   runtime.on("exit", (code: number) => {
@@ -83,7 +85,7 @@ async function main(): Promise<void> {
   try {
     await runtime.start();
   } catch (error) {
-    store.close();
+    await store.close();
     renderer.stop();
     logger?.flush?.();
     throw error;

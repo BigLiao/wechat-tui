@@ -1,6 +1,7 @@
 import { EventEmitter } from "node:events";
 import { createRequire } from "node:module";
-import { createReadStream, existsSync } from "node:fs";
+import { createReadStream } from "node:fs";
+import { access } from "node:fs/promises";
 import { basename } from "node:path";
 import type { Logger } from "pino";
 import type {
@@ -176,7 +177,7 @@ export class Wechat4uAdapter extends EventEmitter implements WeChatProtocol {
     if (!sender) {
       throw new Error("wechat4u does not expose sendMsg method");
     }
-    if (!existsSync(filePath)) {
+    if (!(await fileExists(filePath))) {
       throw new Error(`File not found: ${filePath}`);
     }
 
@@ -401,6 +402,15 @@ export class Wechat4uAdapter extends EventEmitter implements WeChatProtocol {
       this.options.logger?.error({ err: error, message }, "failed to normalize wechat4u message");
       this.emit("error", error instanceof Error ? error : new Error(String(error)));
     }
+  }
+}
+
+async function fileExists(filePath: string): Promise<boolean> {
+  try {
+    await access(filePath);
+    return true;
+  } catch {
+    return false;
   }
 }
 

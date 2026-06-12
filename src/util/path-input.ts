@@ -1,4 +1,3 @@
-import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { extname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -26,7 +25,7 @@ export function imageFilePathFromPastedText(text: string): string | undefined {
   if (!IMAGE_EXTENSIONS.has(extname(filePath).toLowerCase())) {
     return undefined;
   }
-  return existsSync(filePath) ? filePath : undefined;
+  return filePath;
 }
 
 function stripWrappingQuotes(value: string): string {
