@@ -95,6 +95,50 @@ class ContactsBeforeLoginProtocol extends EventEmitter implements WeChatProtocol
   }
 }
 
+class LoginThenLogoutProtocol extends EventEmitter implements WeChatProtocol {
+  private readonly self: UserProfile = {
+    id: contactId("self", ["race-user"]),
+    protocolId: "@race-user",
+    displayName: "Race User"
+  };
+
+  async start(): Promise<void> {
+    this.emit("state", "online" satisfies ConnectionState);
+    this.emit("login", this.self);
+    this.emit("logout");
+  }
+
+  async reconnect(): Promise<void> {}
+
+  async logout(): Promise<void> {
+    this.emit("logout");
+  }
+
+  async sendText(): Promise<{ messageId?: string; raw?: unknown }> {
+    return {};
+  }
+
+  async sendFile(): Promise<{ messageId?: string; raw?: unknown }> {
+    return {};
+  }
+
+  async downloadMedia(): Promise<undefined> {
+    return undefined;
+  }
+
+  async getContacts(): Promise<ContactInput[]> {
+    return [];
+  }
+
+  getCurrentUser(): UserProfile {
+    return this.self;
+  }
+
+  getSessionData(): unknown | undefined {
+    return undefined;
+  }
+}
+
 class QrOnlyProtocol extends EventEmitter implements WeChatProtocol {
   async start(): Promise<void> {
     this.emit("state", "waiting_scan" satisfies ConnectionState);
@@ -263,6 +307,20 @@ describe("WeChatRuntime", () => {
     expect(renderer.latest.view).toBe("chats");
     expect(renderer.latest.accountName).toBe("Early User");
     expect(await store.searchContacts("Early Boss")).toHaveLength(1);
+    await store.close();
+  });
+
+  it("serializes logout after a pending login event", async () => {
+    const store = await SqliteStore.open(tempDb());
+    const protocol = new LoginThenLogoutProtocol();
+    const renderer = new FakeRenderer();
+    const runtime = new WeChatRuntime(protocol, store, renderer, { initialHistoryLimit: 10 });
+
+    await runtime.start();
+
+    expect(renderer.latest.connectionState).toBe("logout");
+    expect(renderer.latest.accountName).toBeUndefined();
+    expect(renderer.latest.statusMessage).toBe("logged out. Use q to quit.");
     await store.close();
   });
 

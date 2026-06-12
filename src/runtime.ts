@@ -264,12 +264,7 @@ export class WeChatRuntime extends EventEmitter {
     });
 
     this.protocol.on("logout", () => {
-      this.connectionState = "logout";
-      this.accountName = undefined;
-      this.activeAccountId = undefined;
-      this.store.clearActiveAccount();
-      this.statusMessage = "logged out. Use q to quit.";
-      void this.render();
+      this.enqueueProtocolEvent(() => this.handleProtocolLogout());
     });
 
     this.protocol.on("error", (error) => {
@@ -356,6 +351,15 @@ export class WeChatRuntime extends EventEmitter {
       this.errorMessage = error instanceof Error ? error.message : String(error);
       void this.render();
     }
+  }
+
+  private async handleProtocolLogout(): Promise<void> {
+    this.connectionState = "logout";
+    this.accountName = undefined;
+    this.activeAccountId = undefined;
+    this.store.clearActiveAccount();
+    this.statusMessage = "logged out. Use q to quit.";
+    void this.render();
   }
 
   private async activateAccount(user: UserProfile): Promise<void> {
