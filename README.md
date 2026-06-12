@@ -19,7 +19,7 @@
 
 ## 快速开始
 
-需要 Node.js `>=22.19.0`。
+需要 Node.js `>=22.19.0`。该最低版本跟随 TUI 依赖 `@earendil-works/pi-tui` 的运行要求。
 
 ```bash
 npm install -g wechat-tui

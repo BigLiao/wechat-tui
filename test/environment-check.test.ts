@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -19,11 +19,10 @@ afterEach(() => {
 });
 
 describe("startup environment check", () => {
-  it("passes when node and sqlite are available", () => {
+  it("passes when node and database directory are available", () => {
     const report = checkStartupEnvironment({
       dbPath: tempDb(),
-      nodeVersion: "22.19.0",
-      loadSqlite: () => ({ DatabaseSync: FakeDatabase })
+      nodeVersion: "22.19.0"
     });
 
     expect(report.ok).toBe(true);
@@ -33,8 +32,7 @@ describe("startup environment check", () => {
   it("reports an unsupported node version before startup", () => {
     const report = checkStartupEnvironment({
       dbPath: tempDb(),
-      nodeVersion: "22.18.0",
-      loadSqlite: () => ({ DatabaseSync: FakeDatabase })
+      nodeVersion: "22.18.0"
     });
 
     expect(report.ok).toBe(false);
@@ -47,28 +45,15 @@ describe("startup environment check", () => {
     expect(formatStartupEnvironmentReport(report)).toContain("当前版本：v22.18.0；要求：>=22.19.0。");
   });
 
-  it("reports unavailable node sqlite support", () => {
-    const report = checkStartupEnvironment({
-      dbPath: tempDb(),
-      nodeVersion: "22.19.0",
-      loadSqlite: () => ({})
-    });
-
-    expect(report.ok).toBe(false);
-    expect(report.issues[0]).toEqual(
-      expect.objectContaining({
-        id: "sqlite-module",
-        title: "SQLite 模块不可用"
-      })
-    );
-  });
-
-  it("reports database open failures with the configured path", () => {
-    const dbPath = tempDb();
+  it("reports database directory failures with the configured path", () => {
+    const dir = mkdtempSync(join(tmpdir(), "wechat-tui-env-"));
+    tempDirs.push(dir);
+    const blockedParent = join(dir, "not-a-directory");
+    writeFileSync(blockedParent, "blocked");
+    const dbPath = join(blockedParent, "db.sqlite");
     const report = checkStartupEnvironment({
       dbPath,
-      nodeVersion: "22.19.0",
-      loadSqlite: () => ({ DatabaseSync: ThrowingDatabase })
+      nodeVersion: "22.19.0"
     });
 
     const formatted = formatStartupEnvironmentReport(report);
@@ -76,29 +61,11 @@ describe("startup environment check", () => {
     expect(report.issues[0]).toEqual(
       expect.objectContaining({
         id: "sqlite-database",
-        title: "SQLite 数据库无法打开"
+        title: "数据库目录不可用"
       })
     );
     expect(formatted).toContain(dbPath);
-    expect(formatted).toContain("permission denied");
+    expect(formatted).toContain(blockedParent);
     expect(formatted).toContain("--db");
   });
 });
-
-class FakeDatabase {
-  constructor(_location?: string) {}
-  prepare(_sql: string): { get: () => unknown } {
-    return { get: () => ({ user_version: 0 }) };
-  }
-  close(): void {}
-}
-
-class ThrowingDatabase {
-  constructor(_location?: string) {
-    throw new Error("permission denied");
-  }
-  prepare(_sql: string): { get: () => unknown } {
-    return { get: () => ({}) };
-  }
-  close(): void {}
-}

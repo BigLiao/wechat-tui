@@ -8,7 +8,7 @@
 - **构建输出**: `dist/` 目录
 - **包名**: `wechat-tui`
 - **CLI 命令**: `wechat-tui`
-- **运行要求**: Node.js `>=22.19.0`，项目依赖内置 `node:sqlite`
+- **运行要求**: Node.js `>=22.19.0`，最低版本跟随 `@earendil-works/pi-tui` 的运行要求
 
 ## 常用命令
 
