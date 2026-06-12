@@ -82,6 +82,8 @@ export class WeChatRuntime extends EventEmitter {
   private renderAgain = false;
   private renderPromise: Promise<void> | undefined;
   private protocolEventQueue: Promise<void> = Promise.resolve();
+  private pendingProtocolEvents = 0;
+  private protocolBatchRenderRequested = false;
   private startupActive = false;
   private startupFrame = 0;
   private startupMessage = "Opening WeChat TUI...";
@@ -277,7 +279,19 @@ export class WeChatRuntime extends EventEmitter {
   }
 
   private enqueueProtocolEvent(task: () => Promise<void>): void {
-    this.protocolEventQueue = this.protocolEventQueue.then(task, task);
+    this.pendingProtocolEvents += 1;
+    const run = async () => {
+      try {
+        await task();
+      } finally {
+        this.pendingProtocolEvents -= 1;
+        if (this.pendingProtocolEvents === 0 && this.protocolBatchRenderRequested) {
+          this.protocolBatchRenderRequested = false;
+          this.scheduleRender();
+        }
+      }
+    };
+    this.protocolEventQueue = this.protocolEventQueue.then(run, run);
     void this.protocolEventQueue.catch((error: unknown) => {
       this.options.logger?.error({ err: error }, "protocol event queue failed");
       this.errorMessage = error instanceof Error ? error.message : String(error);
@@ -344,7 +358,7 @@ export class WeChatRuntime extends EventEmitter {
         return;
       }
       if (await this.handleIncomingMessage(message)) {
-        this.scheduleRender();
+        this.scheduleProtocolBatchRender();
       }
     } catch (error) {
       this.options.logger?.error({ err: error, message: summarizeIncomingMessage(message) }, "failed to handle protocol message");
@@ -1110,6 +1124,14 @@ export class WeChatRuntime extends EventEmitter {
       this.renderScheduled = false;
       void this.render();
     }, RENDER_DEBOUNCE_MS);
+  }
+
+  private scheduleProtocolBatchRender(): void {
+    if (this.pendingProtocolEvents > 0) {
+      this.protocolBatchRenderRequested = true;
+      return;
+    }
+    this.scheduleRender();
   }
 
   private startStartupAnimation(message: string): void {
