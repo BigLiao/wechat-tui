@@ -327,6 +327,7 @@ describe("WorkbenchTerminalRenderer", () => {
     expect(commands.at(-1)?.trim()).toBe("");
     expect(commandPlain).toContain("Commands");
     expect(commandPlain).toContain("/contacts");
+    expect(commandPlain).toContain("/readall");
     expect(confirm[0]?.trim()).toBe("");
     expect(confirm.at(-1)?.trim()).toBe("");
     expect(confirmPlain).toContain("Confirm");

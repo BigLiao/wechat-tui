@@ -456,6 +456,10 @@ export class WeChatRuntime extends EventEmitter {
       await this.clearAppData();
       return;
     }
+    if (key.name === "command-readall") {
+      await this.markAllConversationsRead();
+      return;
+    }
     if (key.name === "command-logout") {
       await this.protocol.logout();
       await this.store.clearSessionData();
@@ -580,6 +584,9 @@ export class WeChatRuntime extends EventEmitter {
     switch (name) {
       case "/contacts":
         this.enterContactSearch(sourceView);
+        return;
+      case "/readall":
+        await this.markAllConversationsRead();
         return;
       case "/send": {
         const filePath = command.slice(name.length).trim();
@@ -1417,6 +1424,14 @@ export class WeChatRuntime extends EventEmitter {
     this.fileRegistry.clear();
     this.statusMessage = "data cleared";
     await this.render();
+  }
+
+  private async markAllConversationsRead(): Promise<void> {
+    const unreadCount = await this.store.totalUnreadCount();
+    await this.store.markAllRead();
+    this.selectedSwitcherConversationId = undefined;
+    this.tabReturnConversationId = undefined;
+    this.statusMessage = unreadCount > 0 ? "all conversations marked read" : "no unread conversations";
   }
 
   private async clearLogFiles(): Promise<void> {

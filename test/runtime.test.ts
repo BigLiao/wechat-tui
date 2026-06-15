@@ -663,6 +663,29 @@ describe("WeChatRuntime", () => {
     await store.close();
   });
 
+  it("marks every unread conversation read from the chats command", async () => {
+    const store = await SqliteStore.open(tempDb());
+    const protocol = new MockProtocol();
+    const renderer = new FakeRenderer();
+    const runtime = new WeChatRuntime(protocol, store, renderer, { initialHistoryLimit: 10 });
+
+    await runtime.start();
+    protocol.emitIncoming("Boss", "first unread", 1_700_000_000_000);
+    protocol.emitIncoming("Project A", "second unread", 1_700_000_100_000);
+    await flushRender();
+    expect(renderer.latest.view).toBe("chats");
+    expect(await store.totalUnreadCount()).toBe(2);
+
+    await runtime.handleKey({ sequence: "", name: "command-readall" });
+
+    expect(await store.totalUnreadCount()).toBe(0);
+    expect(renderer.latest.totalUnreadCount).toBe(0);
+    expect(renderer.latest.unreadConversations).toHaveLength(0);
+    expect(renderer.latest.conversations.every((conversation) => conversation.unreadCount === 0)).toBe(true);
+    expect(renderer.latest.statusMessage).toBe("all conversations marked read");
+    await store.close();
+  });
+
   it("switches unread conversations from the active chat with tab", async () => {
     const store = await SqliteStore.open(tempDb());
     const protocol = new MockProtocol();

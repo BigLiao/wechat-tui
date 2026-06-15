@@ -4,6 +4,7 @@ import { theme, fit } from "../theme.js";
 
 const GLOBAL_COMMANDS: SelectItem[] = [
   { value: "/contacts", label: "/contacts", description: "Search contacts and groups" },
+  { value: "/readall", label: "/readall", description: "Mark all conversations read" },
   { value: "/clear", label: "/clear", description: "Clear messages and logs" },
   { value: "/logout", label: "/logout", description: "Logout and quit" },
   { value: "/quit", label: "/quit", description: "Quit wechat-tui" }

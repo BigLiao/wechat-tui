@@ -935,6 +935,19 @@ export class SqliteStore implements MessageStore {
     });
   }
 
+  async markAllRead(): Promise<void> {
+    return this.enqueueWrite(async () => {
+      const accountId = this.currentAccountId();
+      if (!accountId) {
+        return;
+      }
+      const result = await this.db
+        .prepare("UPDATE conversations SET unread_count = 0, updated_at = ? WHERE account_id = ? AND unread_count > 0")
+        .run(Date.now(), accountId);
+      this.options.logger?.debug({ accountId, changedConversations: Number(result.changes) }, "marked all conversations read");
+    });
+  }
+
   async totalUnreadCount(): Promise<number> {
     const accountId = this.currentAccountId();
     if (!accountId) {

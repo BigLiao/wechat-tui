@@ -138,6 +138,85 @@ describe("SqliteStore", () => {
     await store.close();
   });
 
+  it("marks all unread conversations read for the active account", async () => {
+    const store = await SqliteStore.open(tempDb());
+    await store.setActiveAccount(accountA);
+    const boss: ContactInput = {
+      id: contactId("private", ["read-all-boss"]),
+      protocolId: "@read-all-boss",
+      kind: "private",
+      displayName: "Read All Boss"
+    };
+    const teammate: ContactInput = {
+      id: contactId("private", ["read-all-teammate"]),
+      protocolId: "@read-all-teammate",
+      kind: "private",
+      displayName: "Read All Teammate"
+    };
+    const bossConversation = conversationFromContact(boss);
+    const teammateConversation = conversationFromContact(teammate);
+
+    await store.saveMessage(
+      {
+        id: localMessageId([bossConversation.id, "unread one"]),
+        conversationId: bossConversation.id,
+        senderId: boss.id,
+        senderName: "Read All Boss",
+        isSelf: false,
+        content: "unread one",
+        type: "text",
+        timestamp: 1_700_000_000_000
+      },
+      bossConversation,
+      true
+    );
+    await store.saveMessage(
+      {
+        id: localMessageId([teammateConversation.id, "unread two"]),
+        conversationId: teammateConversation.id,
+        senderId: teammate.id,
+        senderName: "Read All Teammate",
+        isSelf: false,
+        content: "unread two",
+        type: "text",
+        timestamp: 1_700_000_100_000
+      },
+      teammateConversation,
+      true
+    );
+
+    await store.setActiveAccount(accountB);
+    const otherConversation = conversationFromContact({
+      id: contactId("private", ["read-all-other"]),
+      protocolId: "@read-all-other",
+      kind: "private",
+      displayName: "Read All Other"
+    });
+    await store.saveMessage(
+      {
+        id: localMessageId([otherConversation.id, "other unread"]),
+        conversationId: otherConversation.id,
+        senderName: "Read All Other",
+        isSelf: false,
+        content: "other unread",
+        type: "text",
+        timestamp: 1_700_000_200_000
+      },
+      otherConversation,
+      true
+    );
+
+    await store.setActiveAccount(accountA);
+    expect(await store.totalUnreadCount()).toBe(2);
+    await store.markAllRead();
+    expect(await store.totalUnreadCount()).toBe(0);
+    expect(await store.listUnreadConversations()).toHaveLength(0);
+
+    await store.setActiveAccount(accountB);
+    expect(await store.totalUnreadCount()).toBe(1);
+    await store.close();
+  });
+
   it("backfills sender names when a richer contact for the same protocol id is synced later", async () => {
     const store = await SqliteStore.open(tempDb());
     await store.setActiveAccount(accountA);

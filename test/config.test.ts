@@ -34,6 +34,7 @@ describe("CLI config", () => {
   it("documents redraw keyboard controls", () => {
     expect(formatHelp()).toContain("Up/Down select");
     expect(formatHelp()).toContain("/contacts");
+    expect(formatHelp()).toContain("/readall");
     expect(formatHelp()).toContain("Chat > text");
     expect(formatHelp()).toContain("Esc back");
   });

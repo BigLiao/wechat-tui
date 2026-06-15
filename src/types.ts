@@ -273,5 +273,6 @@ export interface MessageStore {
   listMessages(conversationId: string, limit?: number): Promise<MessageRecord[]>;
   searchMessages(keyword: string, limit?: number, conversationId?: string): Promise<SearchResult[]>;
   markRead(conversationId: string): Promise<void>;
+  markAllRead(): Promise<void>;
   totalUnreadCount(): Promise<number>;
 }
