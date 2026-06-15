@@ -860,6 +860,50 @@ describe("WeChatRuntime", () => {
     await store.close();
   });
 
+  it("opens protocol-less legacy unread conversations through the current contact conversation", async () => {
+    const store = await SqliteStore.open(tempDb());
+    const protocol = new MockProtocol();
+    const renderer = new FakeRenderer();
+    const legacyContact: ContactInput = {
+      id: contactId("private", ["legacy-boss-list"]),
+      kind: "private",
+      displayName: "Boss",
+      remarkName: "Boss"
+    };
+    const legacyConversation = conversationFromContact(legacyContact);
+
+    await store.setActiveAccount(protocol.getCurrentUser());
+    await store.upsertContact(legacyContact);
+    await store.saveMessage(
+      {
+        id: localMessageId([legacyConversation.id, "legacy unread"]),
+        conversationId: legacyConversation.id,
+        senderId: legacyContact.id,
+        senderName: "Boss",
+        isSelf: false,
+        content: "legacy unread",
+        type: "text",
+        timestamp: 1_700_000_000_000
+      },
+      legacyConversation,
+      true
+    );
+
+    const runtime = new WeChatRuntime(protocol, store, renderer, { initialHistoryLimit: 10 });
+    await runtime.start();
+    expect(renderer.latest.conversations.find((conversation) => conversation.title === "Boss")?.unreadCount).toBe(1);
+
+    await runtime.handleKey(key.enter());
+
+    expect(renderer.latest.view).toBe("chat");
+    expect(renderer.latest.activeConversation?.protocolId).toBe("@boss");
+    expect(renderer.latest.messages.map((message) => message.content)).toContain("legacy unread");
+    expect(await store.findConversationById(legacyConversation.id)).toBeUndefined();
+    expect(await store.totalUnreadCount()).toBe(0);
+    expect(renderer.latest.unreadConversations.some((conversation) => conversation.title === "Boss")).toBe(false);
+    await store.close();
+  });
+
   it("opens stale group conversations through the current group contact conversation", async () => {
     const store = await SqliteStore.open(tempDb());
     const protocol = new MockProtocol();

@@ -668,16 +668,19 @@ export class SqliteStore implements MessageStore {
       }
 
       const staleContacts = await this.findLazyMergeStaleContacts(accountId, contact);
-      if (staleContacts.length === 0) {
+      const mergeableConversationsById = new Map<string, ConversationRecord>();
+      for (const staleConversation of await this.findLazyMergeStaleConversations(accountId, contact, conversation, staleContacts)) {
+        mergeableConversationsById.set(staleConversation.id, staleConversation);
+      }
+      for (const orphanConversation of await this.findLazyMergeOrphanConversations(accountId, contact, conversation)) {
+        mergeableConversationsById.set(orphanConversation.id, orphanConversation);
+      }
+      const mergeableConversations = Array.from(mergeableConversationsById.values());
+      if (mergeableConversations.length === 0) {
         return conversation;
       }
 
-      const staleConversations = await this.findLazyMergeStaleConversations(accountId, contact, conversation, staleContacts);
-      if (staleConversations.length === 0) {
-        return conversation;
-      }
-
-      await this.applyStaleConversationMerge(accountId, contact, conversation, staleContacts, staleConversations);
+      await this.applyStaleConversationMerge(accountId, contact, conversation, staleContacts, mergeableConversations);
 
       const merged = (await this.findConversationById(conversation.id)) ?? conversation;
       this.options.logger?.info(
@@ -685,7 +688,7 @@ export class SqliteStore implements MessageStore {
           contactId: contact.id,
           conversationId: conversation.id,
           staleContactIds: staleContacts.map((staleContact) => staleContact.id),
-          staleConversationIds: staleConversations.map((staleConversation) => staleConversation.id)
+          staleConversationIds: mergeableConversations.map((staleConversation) => staleConversation.id)
         },
         "merged stale conversations into current contact conversation"
       );
@@ -1209,7 +1212,10 @@ export class SqliteStore implements MessageStore {
       .all(accountId, conversation.kind) as unknown as ConversationRow[];
     const ids: string[] = [];
     for (const candidate of rows.map(asConversation)) {
-      if (await this.contactCanFoldConversation(accountId, contact, candidate)) {
+      const candidateContact = candidate.id === conversation.id
+        ? contact
+        : await this.uniqueActiveContactForConversation(accountId, activeContacts, candidate);
+      if (candidateContact?.id === contact.id) {
         ids.push(candidate.id);
       }
     }
@@ -1250,11 +1256,11 @@ export class SqliteStore implements MessageStore {
     if (!contactMatchesConversation(contact, conversation)) {
       return false;
     }
-    if (conversation.protocolId === contact.protocolId) {
+    if (conversation.protocolId && conversation.protocolId === contact.protocolId) {
       return true;
     }
     if (!conversation.protocolId) {
-      return false;
+      return true;
     }
     const staleContact = await this.findStaleContactByProtocolId(accountId, conversation.kind, conversation.protocolId);
     return !!staleContact && sameLazyMergeContact(contact, staleContact);
@@ -1332,6 +1338,28 @@ export class SqliteStore implements MessageStore {
     }
 
     return Array.from(staleConversationById.values());
+  }
+
+  private async findLazyMergeOrphanConversations(
+    accountId: string,
+    contact: ContactRecord,
+    conversation: ConversationRecord
+  ): Promise<ConversationRecord[]> {
+    const rows = await this.db
+      .prepare("SELECT * FROM conversations WHERE account_id = ? AND kind = ? AND protocol_id IS NULL AND id != ?")
+      .all(accountId, contact.kind, conversation.id) as unknown as ConversationRow[];
+    const activeContacts = await this.listActiveMergeableContacts(accountId);
+    const conversations: ConversationRecord[] = [];
+    for (const candidate of rows.map(asConversation)) {
+      if (!contactMatchesConversation(contact, candidate)) {
+        continue;
+      }
+      const candidateContact = await this.uniqueActiveContactForConversation(accountId, activeContacts, candidate);
+      if (candidateContact?.id === contact.id) {
+        conversations.push(candidate);
+      }
+    }
+    return conversations;
   }
 
   private async applyStaleConversationMerge(

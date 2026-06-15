@@ -584,7 +584,7 @@ describe("WorkbenchTerminalRenderer", () => {
     expect(plain).toContain("draft text");
   });
 
-  it("renders remembered return targets in the switcher status line before tab is pressed again", () => {
+  it("does not render remembered return targets as unread before tab is pressed again", () => {
     const output = renderState(
       baseState({
         view: "chat",
@@ -622,7 +622,7 @@ describe("WorkbenchTerminalRenderer", () => {
     );
 
     const plain = stripAnsi(output);
-    expect(plain).toContain("Boss");
+    expect(plain).not.toContain("Boss");
     expect(plain).not.toContain("Boss(0)");
     expect(plain).not.toContain("⏎ confirm");
   });

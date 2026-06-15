@@ -52,7 +52,9 @@ export class ChatScreen {
 }
 
 function unreadSummary(state: RenderState): string {
-  const conversations = state.switcherConversations.filter((c) => c.id !== state.activeConversation?.id);
+  const conversations = state.switcherConversations.filter(
+    (c) => c.id !== state.activeConversation?.id && (state.conversationSwitcherActive || c.unreadCount > 0)
+  );
   const selectedConversationId = state.conversationSwitcherActive ? state.selectedSwitcherConversationId : undefined;
   const items = conversations
     .slice(0, state.conversationSwitcherActive ? conversations.length : 3)
