@@ -263,7 +263,7 @@ afterEach(() => {
 });
 
 describe("WeChatRuntime", () => {
-  it("shows the QR login screen without the startup splash when no saved session exists", async () => {
+  it("shows the startup splash before the QR login screen when no saved session exists", async () => {
     const store = await SqliteStore.open(tempDb());
     const protocol = new QrOnlyProtocol();
     const renderer = new FakeRenderer();
@@ -271,13 +271,14 @@ describe("WeChatRuntime", () => {
 
     await runtime.start();
 
-    expect(renderer.states.some((state) => state.view === "startup")).toBe(false);
+    expect(renderer.states[0]?.view).toBe("startup");
+    expect(renderer.states.some((state) => state.view === "startup")).toBe(true);
     expect(renderer.latest.view).toBe("login");
     expect(renderer.latest.qr?.uuid).toBe("qr-only");
     await store.close();
   });
 
-  it("shows the startup splash only after a saved session restores login", async () => {
+  it("shows the startup splash while a saved session restores login", async () => {
     const store = await SqliteStore.open(tempDb());
     await store.setSessionData({ restored: true });
     const protocol = new ContactsBeforeLoginProtocol();
@@ -290,6 +291,7 @@ describe("WeChatRuntime", () => {
     await runtime.start();
 
     expect(protocol.startedWithSessionData).toEqual({ restored: true });
+    expect(renderer.states[0]?.view).toBe("startup");
     expect(renderer.states.some((state) => state.view === "startup")).toBe(true);
     expect(renderer.latest.view).toBe("chats");
     expect(renderer.latest.accountName).toBe("Early User");

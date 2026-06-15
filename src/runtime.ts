@@ -117,10 +117,13 @@ export class WeChatRuntime extends EventEmitter {
         }
       }
     );
+    this.startStartupAnimation("Opening WeChat TUI...");
+    this.startUpdateCheck();
+    await this.render();
     const sessionData = await this.store.getSessionData();
     this.pendingStoredSessionStartup = sessionData !== undefined;
-    this.statusMessage = sessionData ? "Checking saved WeChat session..." : "Waiting for WeChat login...";
-    this.startUpdateCheck();
+    this.startupMessage = sessionData ? "Checking saved WeChat session..." : "Preparing WeChat login...";
+    this.statusMessage = this.startupMessage;
     await this.render();
     try {
       await this.protocol.start(sessionData);
@@ -241,6 +244,7 @@ export class WeChatRuntime extends EventEmitter {
     this.protocol.on("qr", (event) => {
       this.options.logger?.info({ uuid: event.uuid, qrUrl: event.qrUrl }, "login QR received");
       this.pendingStoredSessionStartup = false;
+      this.stopStartupAnimation();
       this.qr = event;
       this.view = "login";
       this.statusMessage = "Scan the QR code with WeChat.";
@@ -314,7 +318,11 @@ export class WeChatRuntime extends EventEmitter {
         "runtime login event"
       );
       if (showStartup) {
-        this.startStartupAnimation("Loading your WeChat workspace...");
+        if (this.startupActive) {
+          this.startupMessage = "Loading your WeChat workspace...";
+        } else {
+          this.startStartupAnimation("Loading your WeChat workspace...");
+        }
       }
       void this.render();
     } catch (error) {
