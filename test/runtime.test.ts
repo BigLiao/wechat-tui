@@ -296,6 +296,34 @@ describe("WeChatRuntime", () => {
     await store.close();
   });
 
+  it("keeps the saved-session startup splash visible for the configured minimum", async () => {
+    const store = await SqliteStore.open(tempDb());
+    await store.setSessionData({ restored: true });
+    const protocol = new ContactsBeforeLoginProtocol();
+    const renderer = new FakeRenderer();
+    const runtime = new WeChatRuntime(protocol, store, renderer, {
+      initialHistoryLimit: 10,
+      minimumStartupMs: 50
+    });
+    let settled = false;
+    const startedAt = Date.now();
+
+    const startPromise = runtime.start().then(() => {
+      settled = true;
+    });
+
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    expect(settled).toBe(false);
+    expect(renderer.latest.view).toBe("startup");
+
+    await startPromise;
+
+    expect(Date.now() - startedAt).toBeGreaterThanOrEqual(45);
+    expect(settled).toBe(true);
+    expect(renderer.latest.view).toBe("chats");
+    await store.close();
+  });
+
   it("handles contacts that arrive before the login event during session restart", async () => {
     const store = await SqliteStore.open(tempDb());
     const protocol = new ContactsBeforeLoginProtocol();

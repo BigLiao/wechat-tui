@@ -124,10 +124,10 @@ export class WeChatRuntime extends EventEmitter {
     await this.render();
     try {
       await this.protocol.start(sessionData);
+      await this.protocolEventQueue;
       if (this.startupActive) {
         await waitForMinimumStartup(this.startupStartedAt, this.options.minimumStartupMs ?? 0);
       }
-      await this.protocolEventQueue;
     } finally {
       this.pendingStoredSessionStartup = false;
       this.stopStartupAnimation();
