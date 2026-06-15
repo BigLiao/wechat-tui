@@ -22,6 +22,7 @@ import { formatWechatRecallMessage } from "../util/wechat-recall.js";
 import { preview, summarizeContacts, summarizeIncomingMessage, summarizeRawWechatMessage } from "../logging.js";
 
 const require = createRequire(import.meta.url);
+const WECHAT4U_CONTACT_REFRESH_COOLDOWN_MS = 5 * 60 * 1000;
 
 type RawWechatBot = EventEmitter & {
   botData?: unknown;
@@ -95,6 +96,15 @@ interface RawMessage {
 export interface Wechat4uAdapterOptions {
   logger?: Logger;
 }
+
+interface NormalizeWechat4uMessageOptions {
+  logger?: Logger;
+}
+
+type Wechat4uMessageContactRefreshReason =
+  | "missing-contact"
+  | "empty-group-members"
+  | "missing-group-member-display-name";
 
 export class Wechat4uAdapter extends EventEmitter implements WeChatProtocol {
   private bot?: RawWechatBot;
@@ -391,7 +401,7 @@ export class Wechat4uAdapter extends EventEmitter implements WeChatProtocol {
       }).catch((error) => {
         this.options.logger?.debug({ err: error }, "background sparse group sender hydration failed");
       });
-      const normalized = normalizeWechat4uMessage(message, bot);
+      const normalized = normalizeWechat4uMessage(message, bot, { logger: this.options.logger });
       if (normalized) {
         this.options.logger?.debug({ message: summarizeIncomingMessage(normalized) }, "wechat4u message normalized");
         this.emit("message", normalized);
@@ -429,11 +439,12 @@ export function installNonBlockingWechat4uMessageDispatch(
 
   const extendMessage = bot.Message.extend.bind(bot.Message);
   const inFlightContactRefreshes = new Set<string>();
+  const recentContactRefreshes = new Map<string, number>();
   bot.handleMsg = (messages: RawMessage[]) => {
     const messageList = Array.isArray(messages) ? messages : [];
     for (const raw of messageList) {
       try {
-        scheduleWechat4uMessageContactRefresh(raw, bot, inFlightContactRefreshes, options);
+        scheduleWechat4uMessageContactRefresh(raw, bot, inFlightContactRefreshes, recentContactRefreshes, options);
         ensureWechat4uMessageContactPlaceholder(raw, bot);
         const message = extendMessage(raw);
         bot.emit("message", message);
@@ -454,19 +465,64 @@ function scheduleWechat4uMessageContactRefresh(
   raw: RawMessage,
   bot: RawWechatBot,
   inFlightContactRefreshes: Set<string>,
+  recentContactRefreshes: Map<string, number>,
   options: NonBlockingWechat4uMessageDispatchOptions
 ): void {
   const fromUserName = raw.FromUserName;
-  if (!fromUserName || !bot.batchGetContact || !bot.updateContacts || !shouldRefreshWechat4uMessageContact(raw, bot)) {
+  const reason = wechat4uMessageContactRefreshReason(raw, bot);
+  if (!fromUserName || !bot.batchGetContact || !bot.updateContacts || !reason) {
+    return;
+  }
+  const refreshKey = `${fromUserName}:${reason}`;
+  const now = Date.now();
+  const lastRefreshAt = recentContactRefreshes.get(refreshKey);
+  if (lastRefreshAt !== undefined && now - lastRefreshAt < WECHAT4U_CONTACT_REFRESH_COOLDOWN_MS) {
+    options.logger?.trace(
+      {
+        fromUserName,
+        reason,
+        lastRefreshAt,
+        cooldownMs: WECHAT4U_CONTACT_REFRESH_COOLDOWN_MS
+      },
+      "skipping background message contact refresh during cooldown"
+    );
     return;
   }
   if (inFlightContactRefreshes.has(fromUserName)) {
+    options.logger?.trace(
+      {
+        fromUserName,
+        reason,
+        raw: summarizeRawWechatMessage(raw)
+      },
+      "skipping background message contact refresh already in flight"
+    );
     return;
   }
 
   inFlightContactRefreshes.add(fromUserName);
+  options.logger?.debug(
+    {
+      fromUserName,
+      reason,
+      contact: summarizeGroupSenderRawContact(bot.contacts?.[fromUserName]),
+      senderProtocolId: groupMessageSenderProtocolId(raw),
+      raw: summarizeRawWechatMessage(raw)
+    },
+    "scheduling background message contact refresh"
+  );
   void bot.batchGetContact([{ UserName: fromUserName }]).then((contacts) => {
+    options.logger?.debug(
+      {
+        fromUserName,
+        reason,
+        returnedCount: contacts.length,
+        returnedContacts: contacts.slice(0, 3).map((contact) => summarizeGroupContactRaw(contact))
+      },
+      "background message contact refresh returned"
+    );
     bot.updateContacts?.(contacts);
+    recentContactRefreshes.set(refreshKey, Date.now());
   }).catch((error) => {
     options.logger?.debug({ err: error, fromUserName }, "background message contact refresh failed");
   }).finally(() => {
@@ -474,16 +530,30 @@ function scheduleWechat4uMessageContactRefresh(
   });
 }
 
-function shouldRefreshWechat4uMessageContact(raw: RawMessage, bot: RawWechatBot): boolean {
+function wechat4uMessageContactRefreshReason(
+  raw: RawMessage,
+  bot: RawWechatBot
+): Wechat4uMessageContactRefreshReason | undefined {
   const fromUserName = raw.FromUserName;
   if (!fromUserName) {
-    return false;
+    return undefined;
   }
   const contact = bot.contacts?.[fromUserName];
   if (!contact) {
-    return true;
+    return "missing-contact";
   }
-  return fromUserName.startsWith("@@") && Number(contact.MemberCount ?? 0) === 0;
+  if (!fromUserName.startsWith("@@")) {
+    return undefined;
+  }
+  if (Number(contact.MemberCount ?? 0) === 0) {
+    return "empty-group-members";
+  }
+  const senderProtocolId = groupMessageSenderProtocolId(raw);
+  if (!senderProtocolId || !senderProtocolId.startsWith("@") || senderProtocolId.startsWith("@@")) {
+    return undefined;
+  }
+  const member = contact.MemberList?.find((item) => item.UserName === senderProtocolId);
+  return rawContactHasGroupDisplayName(member) ? undefined : "missing-group-member-display-name";
 }
 
 function ensureWechat4uMessageContactPlaceholder(raw: RawMessage, bot: RawWechatBot): void {
@@ -599,7 +669,11 @@ function contactIdentityParts(
   return protocolId ? [protocolId] : [uin, alias, remarkName, nickName, displayName];
 }
 
-export function normalizeWechat4uMessage(rawInput: unknown, botInput: unknown): IncomingProtocolMessage | undefined {
+export function normalizeWechat4uMessage(
+  rawInput: unknown,
+  botInput: unknown,
+  options: NormalizeWechat4uMessageOptions = {}
+): IncomingProtocolMessage | undefined {
   const raw = rawInput as RawMessage;
   const bot = botInput as RawWechatBot;
   if (isInternalProtocolMessage(raw, bot)) {
@@ -626,6 +700,10 @@ export function normalizeWechat4uMessage(rawInput: unknown, botInput: unknown): 
     ? normalizeContact(bot.user ?? { UserName: selfProtocolId, NickName: "You", isSelf: true }, bot.user)
     : normalizeSender(raw, bot, conversationContact, parsedContent);
   const content = messageContentForKind(type, raw, conversationContact, parsedContent, isSelf);
+
+  if (conversationContact.kind === "group" && !isSelf) {
+    logGroupSenderResolution(options.logger, raw, bot, conversationContact, parsedContent, sender);
+  }
 
   return {
     id: protocolMessageId ? `wechat:${protocolMessageId}` : localMessageId([conversation.id, sender.id, content, String(timestamp)]),
@@ -665,11 +743,32 @@ export async function hydrateSparseGroupSender(
   const candidates = groupRoomIdCandidates(target.groupRaw, target.conversationProtocolId);
   const fetchKey = `${target.conversationProtocolId}:${target.senderProtocolId}`;
   if (options.hydratedKeys?.has(fetchKey) || options.inFlightKeys?.has(fetchKey)) {
+    options.logger?.trace(
+      {
+        groupProtocolId: target.conversationProtocolId,
+        senderProtocolId: target.senderProtocolId,
+        alreadyHydrated: options.hydratedKeys?.has(fetchKey) === true,
+        inFlight: options.inFlightKeys?.has(fetchKey) === true
+      },
+      "skipping sparse group sender hydration"
+    );
     return undefined;
   }
   options.inFlightKeys?.add(fetchKey);
+  options.logger?.debug(
+    {
+      groupProtocolId: target.conversationProtocolId,
+      senderProtocolId: target.senderProtocolId,
+      candidateCount: candidates.length,
+      existingMember: summarizeGroupSenderRawContact(target.groupMember),
+      directoryContact: summarizeGroupSenderRawContact(target.directoryContact),
+      parsedSenderDisplayName: target.parsedSenderDisplayName
+    },
+    "hydrating sparse group sender"
+  );
 
   try {
+    let fallbackHydrated: { contact: RawContact; hasEncryChatRoomId: boolean } | undefined;
     for (const encryChatRoomId of candidates) {
       try {
         const contacts = await bot.batchGetContact([
@@ -679,7 +778,35 @@ export async function hydrateSparseGroupSender(
           }
         ]);
         const hydrated = contacts.find((contact) => contact.UserName === target.senderProtocolId);
-        if (!hydrated || !rawContactHasUsefulGroupSenderName(hydrated)) {
+        if (!hydrated) {
+          continue;
+        }
+        if (!rawContactHasUsefulGroupSenderName(hydrated)) {
+          options.logger?.debug(
+            {
+              groupProtocolId: target.conversationProtocolId,
+              senderProtocolId: target.senderProtocolId,
+              hasEncryChatRoomId: encryChatRoomId.length > 0,
+              contact: summarizeGroupSenderRawContact(hydrated)
+            },
+            "sparse group sender lookup returned no useful name"
+          );
+          continue;
+        }
+        if (!rawContactHasGroupDisplayName(hydrated)) {
+          fallbackHydrated ??= {
+            contact: hydrated,
+            hasEncryChatRoomId: encryChatRoomId.length > 0
+          };
+          options.logger?.debug(
+            {
+              groupProtocolId: target.conversationProtocolId,
+              senderProtocolId: target.senderProtocolId,
+              hasEncryChatRoomId: encryChatRoomId.length > 0,
+              contact: summarizeGroupSenderRawContact(hydrated)
+            },
+            "sparse group sender lookup returned fallback name"
+          );
           continue;
         }
         mergeGroupMemberIntoRaw(target.groupRaw, hydrated);
@@ -688,7 +815,8 @@ export async function hydrateSparseGroupSender(
           {
             groupProtocolId: target.conversationProtocolId,
             senderProtocolId: target.senderProtocolId,
-            hasEncryChatRoomId: encryChatRoomId.length > 0
+            hasEncryChatRoomId: encryChatRoomId.length > 0,
+            contact: summarizeGroupSenderRawContact(hydrated)
           },
           "hydrated sparse group sender"
         );
@@ -705,6 +833,20 @@ export async function hydrateSparseGroupSender(
         );
       }
     }
+    if (fallbackHydrated) {
+      mergeGroupMemberIntoRaw(target.groupRaw, fallbackHydrated.contact);
+      options.hydratedKeys?.add(fetchKey);
+      options.logger?.debug(
+        {
+          groupProtocolId: target.conversationProtocolId,
+          senderProtocolId: target.senderProtocolId,
+          hasEncryChatRoomId: fallbackHydrated.hasEncryChatRoomId,
+          contact: summarizeGroupSenderRawContact(fallbackHydrated.contact)
+        },
+        "hydrated sparse group sender with fallback name"
+      );
+      return target.groupRaw;
+    }
     return undefined;
   } finally {
     options.inFlightKeys?.delete(fetchKey);
@@ -715,6 +857,9 @@ interface SparseGroupSenderHydrationTarget {
   conversationProtocolId: string;
   senderProtocolId: string;
   groupRaw: RawContact;
+  groupMember?: RawContact;
+  directoryContact?: RawContact;
+  parsedSenderDisplayName?: string;
 }
 
 function sparseGroupSenderHydrationTarget(raw: RawMessage, bot: RawWechatBot): SparseGroupSenderHydrationTarget | undefined {
@@ -748,19 +893,17 @@ function sparseGroupSenderHydrationTarget(raw: RawMessage, bot: RawWechatBot): S
   }
 
   const member = groupRaw.MemberList?.find((item) => item.UserName === senderProtocolId);
-  if (
-    rawContactHasUsefulGroupSenderName(member) ||
-    rawContactHasUsefulGroupSenderName(bot.contacts?.[senderProtocolId]) ||
-    !!parsedContent.senderDisplayName ||
-    !!cleanGroupSenderDisplayName(raw.ActualNickName)
-  ) {
+  if (rawContactHasGroupDisplayName(member)) {
     return undefined;
   }
 
   return {
     conversationProtocolId,
     senderProtocolId,
-    groupRaw
+    groupRaw,
+    groupMember: member,
+    directoryContact: bot.contacts?.[senderProtocolId],
+    parsedSenderDisplayName: parsedContent.senderDisplayName
   };
 }
 
@@ -772,6 +915,10 @@ function rawContactHasUsefulGroupSenderName(contact: RawContact | undefined): bo
     contact?.NickName,
     contact?.Alias
   );
+}
+
+function rawContactHasGroupDisplayName(contact: RawContact | undefined): boolean {
+  return !!firstUsefulGroupSenderName(contact?.DisplayName);
 }
 
 function groupRoomIdCandidates(groupRaw: RawContact, conversationProtocolId: string): string[] {
@@ -839,9 +986,7 @@ function normalizeSender(
   if (conversationContact.kind === "group") {
     const senderProtocolId = parsedContent.senderProtocolId ?? raw.ActualUserName;
     const conversationRaw = conversationContact.raw as RawContact | undefined;
-    const member = senderProtocolId
-      ? conversationRaw?.MemberList?.find((item) => item.UserName === senderProtocolId) ?? bot.contacts?.[senderProtocolId]
-      : undefined;
+    const member = senderProtocolId ? conversationRaw?.MemberList?.find((item) => item.UserName === senderProtocolId) : undefined;
     if (senderProtocolId) {
       const contact = mergeGroupSenderContact({
         senderProtocolId,
@@ -858,6 +1003,59 @@ function normalizeSender(
     return syntheticGroupSender(conversationContact, "Group member");
   }
   return conversationContact;
+}
+
+function logGroupSenderResolution(
+  logger: Logger | undefined,
+  raw: RawMessage,
+  bot: RawWechatBot,
+  conversationContact: ContactInput,
+  parsedContent: ParsedMessageContent,
+  sender: ContactInput
+): void {
+  const summary = summarizeGroupSenderResolution(raw, bot, conversationContact, parsedContent, sender);
+  if (summary.hasGroupDisplayName === true) {
+    logger?.trace({ sender: summary }, "resolved group message sender");
+    return;
+  }
+  logger?.debug({ sender: summary }, "resolved group message sender");
+}
+
+function summarizeGroupSenderResolution(
+  raw: RawMessage,
+  bot: RawWechatBot,
+  conversationContact: ContactInput,
+  parsedContent: ParsedMessageContent,
+  sender: ContactInput
+): Record<string, unknown> {
+  const conversationRaw = conversationContact.raw as RawContact | undefined;
+  const senderProtocolId = parsedContent.senderProtocolId ?? raw.ActualUserName;
+  const groupMember = senderProtocolId
+    ? conversationRaw?.MemberList?.find((item) => item.UserName === senderProtocolId)
+    : undefined;
+  const directoryContact = senderProtocolId ? bot.contacts?.[senderProtocolId] : undefined;
+  const hasGroupDisplayName = rawContactHasGroupDisplayName(groupMember);
+
+  return {
+    messageId: raw.MsgId ?? raw.NewMsgId,
+    conversationProtocolId: conversationContact.protocolId,
+    senderProtocolId,
+    hasGroupDisplayName,
+    parsedSenderDisplayName: parsedContent.senderDisplayName,
+    actualNickName: cleanGroupSenderDisplayName(raw.ActualNickName),
+    selected: {
+      id: sender.id,
+      protocolId: sender.protocolId,
+      displayName: sender.displayName,
+      remarkName: sender.remarkName,
+      nickName: sender.nickName,
+      alias: sender.alias
+    },
+    groupMember: summarizeGroupSenderRawContact(groupMember),
+    directoryContact: summarizeGroupSenderRawContact(directoryContact),
+    groupMemberCount: conversationRaw?.MemberCount,
+    groupMemberListSize: conversationRaw?.MemberList?.length
+  };
 }
 
 interface ParsedMessageContent {
@@ -880,14 +1078,14 @@ function parseMessageContent(
   if (!match) {
     return {
       content,
-      senderProtocolId: raw.ActualUserName ?? extractGroupSenderProtocolId(raw.OriginalContent) ?? extractGroupSenderProtocolId(raw.Content),
+      senderProtocolId: groupMessageSenderProtocolId(raw),
       senderDisplayName: cleanGroupSenderDisplayName(raw.ActualNickName)
     };
   }
 
   const senderDisplayName = cleanGroupSenderDisplayName(raw.ActualNickName) || cleanGroupSenderDisplayName(match[1]);
   return {
-    senderProtocolId: raw.ActualUserName ?? extractGroupSenderProtocolId(raw.OriginalContent) ?? extractGroupSenderProtocolId(raw.Content),
+    senderProtocolId: groupMessageSenderProtocolId(raw),
     senderDisplayName,
     content: match[2].trim()
   };
@@ -1314,6 +1512,10 @@ function cleanGroupSenderDisplayName(input: unknown): string | undefined {
   return value && !looksLikeProtocolUserName(value) ? value : undefined;
 }
 
+function groupMessageSenderProtocolId(raw: RawMessage): string | undefined {
+  return raw.ActualUserName ?? extractGroupSenderProtocolId(raw.OriginalContent) ?? extractGroupSenderProtocolId(raw.Content);
+}
+
 function extractGroupSenderProtocolId(input: unknown): string | undefined {
   const raw = typeof input === "string" ? input : "";
   return raw.match(/^(@[^:<\n]+):(?:<br\s*\/?>|\n)?/)?.[1];
@@ -1339,20 +1541,19 @@ function mergeGroupSenderContact(input: {
   fallbackDisplayName?: string;
   fallbackNickName?: string;
 }): RawContact {
-  const merged: RawContact = {
-    ...(input.directoryContact ?? {}),
-    ...(input.groupMember ?? {}),
-    UserName: input.senderProtocolId
-  };
-
   const memberDisplayName = input.groupMember?.getDisplayName?.();
   const directoryDisplayName = input.directoryContact?.getDisplayName?.();
+  const groupDisplayName = firstUsefulGroupSenderName(input.groupMember?.DisplayName);
   const remarkName = firstUsefulGroupSenderName(input.groupMember?.RemarkName, input.directoryContact?.RemarkName);
   const displayName = firstUsefulGroupSenderName(
+    groupDisplayName,
+    input.groupMember?.RemarkName,
     memberDisplayName,
-    directoryDisplayName,
-    input.groupMember?.DisplayName,
+    input.directoryContact?.RemarkName,
     input.directoryContact?.DisplayName,
+    directoryDisplayName,
+    input.groupMember?.NickName,
+    input.directoryContact?.NickName,
     input.fallbackDisplayName
   );
   const nickName = firstUsefulGroupSenderName(
@@ -1362,13 +1563,49 @@ function mergeGroupSenderContact(input: {
     input.fallbackDisplayName
   );
 
+  const merged: RawContact = {
+    UserName: input.senderProtocolId
+  };
   merged.RemarkName = remarkName;
-  merged.DisplayName = displayName ?? nickName ?? remarkName ?? "Group member";
+  if (groupDisplayName) {
+    merged.DisplayName = groupDisplayName;
+  }
   merged.NickName = nickName ?? displayName ?? remarkName ?? "Group member";
   merged.Alias = firstCleanValue(input.groupMember?.Alias, input.directoryContact?.Alias);
-  merged.getDisplayName = () => remarkName ?? displayName ?? nickName ?? "Group member";
+  merged.getDisplayName = () => displayName ?? remarkName ?? nickName ?? "Group member";
 
   return merged;
+}
+
+function summarizeGroupSenderRawContact(contact: RawContact | undefined): Record<string, unknown> | undefined {
+  if (!contact) {
+    return undefined;
+  }
+  return {
+    UserName: contact.UserName,
+    RemarkName: cleanGroupSenderDisplayName(contact.RemarkName),
+    DisplayName: cleanGroupSenderDisplayName(contact.DisplayName),
+    NickName: cleanGroupSenderDisplayName(contact.NickName),
+    Alias: cleanGroupSenderDisplayName(contact.Alias),
+    getDisplayName: cleanGroupSenderDisplayName(contact.getDisplayName?.()),
+    hasDisplayName: rawContactHasGroupDisplayName(contact)
+  };
+}
+
+function summarizeGroupContactRaw(contact: RawContact | undefined): Record<string, unknown> | undefined {
+  if (!contact) {
+    return undefined;
+  }
+  return {
+    UserName: contact.UserName,
+    RemarkName: cleanGroupSenderDisplayName(contact.RemarkName),
+    DisplayName: cleanGroupSenderDisplayName(contact.DisplayName),
+    NickName: cleanGroupSenderDisplayName(contact.NickName),
+    MemberCount: contact.MemberCount,
+    MemberListSize: contact.MemberList?.length,
+    EncryChatRoomId: cleanRawString(contact.EncryChatRoomId),
+    sampleMembers: contact.MemberList?.slice(0, 5).map((member) => summarizeGroupSenderRawContact(member))
+  };
 }
 
 function firstUsefulGroupSenderName(...inputs: Array<unknown>): string | undefined {

@@ -102,7 +102,8 @@ export function summarizeContacts(contacts: ContactInput[]): Record<string, unkn
       displayName: contact.displayName,
       remarkName: contact.remarkName,
       nickName: contact.nickName,
-      isSelf: contact.isSelf === true
+      isSelf: contact.isSelf === true,
+      groupRaw: contact.kind === "group" ? summarizeGroupContactRaw(contact.raw) : undefined
     }))
   };
 }
@@ -225,6 +226,22 @@ function summarizeContact(contact: ContactInput): Record<string, unknown> {
     remarkName: contact.remarkName,
     nickName: contact.nickName,
     isSelf: contact.isSelf === true
+  };
+}
+
+function summarizeGroupContactRaw(raw: unknown): Record<string, unknown> | undefined {
+  if (!raw || typeof raw !== "object") {
+    return undefined;
+  }
+  const value = raw as {
+    MemberCount?: unknown;
+    MemberList?: unknown;
+    EncryChatRoomId?: unknown;
+  };
+  return {
+    MemberCount: value.MemberCount,
+    MemberListSize: Array.isArray(value.MemberList) ? value.MemberList.length : undefined,
+    hasEncryChatRoomId: typeof value.EncryChatRoomId === "string" && value.EncryChatRoomId.length > 0
   };
 }
 

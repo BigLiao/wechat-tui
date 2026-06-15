@@ -59,6 +59,50 @@ const bot = {
 const recallXml =
   '<sysmsg type="revokemsg"><revokemsg><session>wxid_test_contact</session><oldmsgid>old-message-id</oldmsgid><msgid>message-id</msgid><replacemsg><![CDATA["Test Contact" recalled a message]]></replacemsg></revokemsg></sysmsg>';
 
+type TestRawContact = {
+  UserName: string;
+  NickName?: string;
+  DisplayName?: string;
+  MemberCount?: number;
+  MemberList?: unknown[];
+};
+
+interface TestDispatchBotOptions {
+  contacts?: Record<string, TestRawContact>;
+  normalizeBreaks?: boolean;
+  batchGetContact?: (contacts: unknown[]) => Promise<unknown[]>;
+  updateContacts?: (contacts: unknown[]) => void;
+}
+
+function createDispatchBot(options: TestDispatchBotOptions = {}) {
+  return Object.assign(new EventEmitter(), {
+    user: { UserName: "@me", NickName: "Me" },
+    contacts: {
+      "@me": { UserName: "@me", NickName: "Me" },
+      ...options.contacts
+    } as Record<string, TestRawContact>,
+    CONF: {
+      MSGTYPE_STATUSNOTIFY: 51
+    },
+    Message: {
+      extend: (message: Record<string, unknown>) => {
+        message.OriginalContent = message.Content;
+        message.isSendBySelf = message.FromUserName === "@me";
+        if (options.normalizeBreaks) {
+          message.Content = String(message.Content ?? "").replace(/<br\/>/g, "\n");
+        }
+        return message;
+      }
+    },
+    handleMsg: (_messages: unknown[]) => {
+      throw new Error("original handleMsg should be replaced");
+    },
+    stop: () => {},
+    batchGetContact: options.batchGetContact ?? (async () => new Promise<unknown[]>(() => {})),
+    updateContacts: options.updateContacts ?? (() => {})
+  });
+}
+
 describe("normalizeWechat4uMessage", () => {
   it("drops Web WeChat status notify messages", () => {
     const message = normalizeWechat4uMessage(
@@ -378,6 +422,47 @@ describe("normalizeWechat4uMessage", () => {
     expect(message?.content).toBe("hello");
   });
 
+  it("prefers group display names over member nicknames", () => {
+    const scopedBot = {
+      ...bot,
+      contacts: {
+        ...bot.contacts,
+        "@alice": {
+          UserName: "@alice",
+          NickName: "Ckey"
+        },
+        "@@project": {
+          UserName: "@@project",
+          NickName: "Project A",
+          MemberCount: 1,
+          MemberList: [
+            {
+              UserName: "@alice",
+              DisplayName: "大剑断龙车",
+              NickName: "Ckey",
+              getDisplayName: () => "Ckey"
+            }
+          ]
+        }
+      }
+    };
+    const message = normalizeWechat4uMessage(
+      {
+        MsgId: "group-display-name",
+        FromUserName: "@@project",
+        ToUserName: "@me",
+        MsgType: 1,
+        Content: "Ckey:\nhello",
+        OriginalContent: "@alice:<br/>hello",
+        CreateTime: 1_700_000_000
+      },
+      scopedBot
+    );
+
+    expect(message?.sender.displayName).toBe("大剑断龙车");
+    expect(message?.sender.nickName).toBe("Ckey");
+  });
+
   it("uses the group message prefix as a fallback sender name", () => {
     const message = normalizeWechat4uMessage(
       {
@@ -511,6 +596,55 @@ describe("normalizeWechat4uMessage", () => {
     expect(sparseBot.contacts["@member" as keyof typeof sparseBot.contacts]).toBeUndefined();
   });
 
+  it("hydrates group senders even when the message prefix has a readable nickname", async () => {
+    const group = {
+      UserName: "@@nickname-group",
+      NickName: "Nickname Group",
+      EncryChatRoomId: "@@nickname-room",
+      MemberCount: 1,
+      MemberList: [] as unknown[]
+    };
+    const calls: unknown[] = [];
+    const sparseBot = {
+      ...bot,
+      contacts: {
+        "@me": bot.contacts["@me"],
+        "@member": {
+          UserName: "@member",
+          NickName: "Ckey"
+        },
+        "@@nickname-group": group
+      },
+      batchGetContact: async (contacts: unknown[]) => {
+        calls.push(contacts);
+        return [
+          {
+            UserName: "@member",
+            DisplayName: "大剑断龙车",
+            NickName: "Ckey"
+          }
+        ];
+      }
+    };
+    const raw = {
+      MsgId: "group-hydrate-nickname",
+      FromUserName: "@@nickname-group",
+      ToUserName: "@me",
+      MsgType: 1,
+      Content: "Ckey:\nhello",
+      OriginalContent: "@member:<br/>hello",
+      CreateTime: 1_700_000_000
+    };
+
+    const hydratedGroup = await hydrateSparseGroupSender(raw, sparseBot);
+    const message = normalizeWechat4uMessage(raw, sparseBot);
+
+    expect(hydratedGroup).toBe(group);
+    expect(calls).toHaveLength(1);
+    expect(message?.sender.displayName).toBe("大剑断龙车");
+    expect(message?.sender.nickName).toBe("Ckey");
+  });
+
   it("retries sparse group sender hydration after an empty lookup result", async () => {
     const group = {
       UserName: "@@retry-group",
@@ -557,27 +691,8 @@ describe("normalizeWechat4uMessage", () => {
 
 describe("installNonBlockingWechat4uMessageDispatch", () => {
   it("emits group messages without waiting for missing contact lookup", () => {
-    const bot = Object.assign(new EventEmitter(), {
-      user: { UserName: "@me", NickName: "Me" },
-      contacts: {
-        "@me": { UserName: "@me", NickName: "Me" }
-      } as Record<string, { UserName: string; NickName?: string; MemberList?: unknown[] }>,
-      CONF: {
-        MSGTYPE_STATUSNOTIFY: 51
-      },
-      Message: {
-        extend: (message: Record<string, unknown>) => {
-          message.OriginalContent = message.Content;
-          message.isSendBySelf = message.FromUserName === "@me";
-          message.Content = String(message.Content ?? "").replace(/<br\/>/g, "\n");
-          return message;
-        }
-      },
-      handleMsg: (_messages: unknown[]) => {
-        throw new Error("original handleMsg should be replaced");
-      },
-      stop: () => {},
-      batchGetContact: async () => new Promise<unknown[]>(() => {}),
+    const bot = createDispatchBot({
+      normalizeBreaks: true,
       updateContacts: () => {
         throw new Error("slow lookup should not resolve");
       }
@@ -615,23 +730,7 @@ describe("installNonBlockingWechat4uMessageDispatch", () => {
       MemberCount: 1,
       MemberList: [{ UserName: "@member", NickName: "Alice" }]
     };
-    const bot = Object.assign(new EventEmitter(), {
-      user: { UserName: "@me", NickName: "Me" },
-      contacts: {
-        "@me": { UserName: "@me", NickName: "Me" }
-      } as Record<string, { UserName: string; NickName?: string; MemberList?: unknown[] }>,
-      CONF: {
-        MSGTYPE_STATUSNOTIFY: 51
-      },
-      Message: {
-        extend: (message: Record<string, unknown>) => {
-          message.OriginalContent = message.Content;
-          message.isSendBySelf = message.FromUserName === "@me";
-          return message;
-        }
-      },
-      handleMsg: (_messages: unknown[]) => {},
-      stop: () => {},
+    const bot = createDispatchBot({
       batchGetContact: async (contacts: unknown[]) => {
         requestedContacts = contacts;
         return [richGroup];
@@ -656,6 +755,105 @@ describe("installNonBlockingWechat4uMessageDispatch", () => {
 
     expect(requestedContacts).toEqual([{ UserName: "@@group" }]);
     expect(updatedContacts).toEqual([richGroup]);
+  });
+
+  it("refreshes group contacts when the sender member lacks a group display name", async () => {
+    let requestedContacts: unknown[] | undefined;
+    let updatedContacts: unknown[] | undefined;
+    const richGroup = {
+      UserName: "@@group",
+      NickName: "Project",
+      MemberCount: 1,
+      MemberList: [{ UserName: "@member", DisplayName: "大剑断龙车", NickName: "Ckey" }]
+    };
+    const bot = createDispatchBot({
+      contacts: {
+        "@@group": {
+          UserName: "@@group",
+          NickName: "Project",
+          MemberCount: 1,
+          MemberList: [{ UserName: "@member", NickName: "Ckey" }]
+        }
+      },
+      batchGetContact: async (contacts: unknown[]) => {
+        requestedContacts = contacts;
+        return [richGroup];
+      },
+      updateContacts: (contacts: unknown[]) => {
+        updatedContacts = contacts;
+      }
+    });
+
+    expect(installNonBlockingWechat4uMessageDispatch(bot)).toBe(true);
+    bot.handleMsg([
+      {
+        MsgId: "group-1",
+        FromUserName: "@@group",
+        ToUserName: "@me",
+        ActualUserName: "@member",
+        MsgType: 1,
+        Content: "Ckey:<br/>hello"
+      }
+    ]);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(requestedContacts).toEqual([{ UserName: "@@group" }]);
+    expect(updatedContacts).toEqual([richGroup]);
+  });
+
+  it("does not repeatedly refresh the same group contact during the refresh cooldown", async () => {
+    const requestedContacts: unknown[] = [];
+    const richGroup = {
+      UserName: "@@group",
+      NickName: "Project",
+      MemberCount: 1,
+      MemberList: [{ UserName: "@member", NickName: "Ckey" }]
+    };
+    const bot = createDispatchBot({
+      contacts: {
+        "@@group": {
+          UserName: "@@group",
+          NickName: "Project",
+          MemberCount: 1,
+          MemberList: [{ UserName: "@member", NickName: "Ckey" }]
+        }
+      },
+      batchGetContact: async (contacts: unknown[]) => {
+        requestedContacts.push(contacts);
+        return [richGroup];
+      },
+      updateContacts: () => {}
+    });
+
+    expect(installNonBlockingWechat4uMessageDispatch(bot)).toBe(true);
+    bot.handleMsg([
+      {
+        MsgId: "group-1",
+        FromUserName: "@@group",
+        ToUserName: "@me",
+        ActualUserName: "@member",
+        MsgType: 1,
+        Content: "Ckey:<br/>hello"
+      }
+    ]);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    bot.handleMsg([
+      {
+        MsgId: "group-2",
+        FromUserName: "@@group",
+        ToUserName: "@me",
+        ActualUserName: "@member",
+        MsgType: 1,
+        Content: "Ckey:<br/>again"
+      }
+    ]);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(requestedContacts).toEqual([[{ UserName: "@@group" }]]);
   });
 });
 

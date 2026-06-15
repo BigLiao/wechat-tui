@@ -412,6 +412,12 @@ export class SqliteStore implements MessageStore {
         stabilizeGroupMemberForUpsert(member, existing),
         accountId
       );
+      const upsertDecision = summarizeGroupMemberUpsert(member, existing, memberForStorage);
+      if (groupMemberUpsertNeedsDebug(member, existing, memberForStorage)) {
+        this.options.logger?.debug(upsertDecision, "group member upsert decision");
+      } else {
+        this.options.logger?.trace(upsertDecision, "group member upsert decision");
+      }
       await this.db
         .prepare(
           "INSERT INTO group_members " +
@@ -442,16 +448,21 @@ export class SqliteStore implements MessageStore {
         throw new Error(`Failed to save group member ${member.id}`);
       }
       await this.backfillSenderNameFromGroupMember(saved, existing?.displayName);
-      this.options.logger?.trace(
-        {
-          id: saved.id,
-          groupId: saved.groupId,
-          groupProtocolId: saved.groupProtocolId,
-          memberProtocolId: saved.memberProtocolId,
-          displayName: saved.displayName
-        },
-        "group member upserted"
-      );
+      const groupMemberSummary = {
+        id: saved.id,
+        groupId: saved.groupId,
+        groupProtocolId: saved.groupProtocolId,
+        memberProtocolId: saved.memberProtocolId,
+        displayName: saved.displayName,
+        remarkName: saved.remarkName,
+        nickName: saved.nickName,
+        previousDisplayName: existing?.displayName
+      };
+      if (existing?.displayName && existing.displayName !== saved.displayName) {
+        this.options.logger?.debug(groupMemberSummary, "group member name changed");
+      } else {
+        this.options.logger?.trace(groupMemberSummary, "group member upserted");
+      }
       return saved;
     });
   }
@@ -1093,7 +1104,7 @@ export class SqliteStore implements MessageStore {
         member.memberProtocolId
       );
 
-    await this.db
+    const previewResult = await this.db
       .prepare(
         "UPDATE conversations SET last_message_sender_name = ? WHERE account_id = ? " +
           `AND ${previewNameSql} ` +
@@ -1119,16 +1130,22 @@ export class SqliteStore implements MessageStore {
       );
 
     const changes = Number(result.changes);
-    if (changes > 0) {
+    const previewChanges = Number(previewResult.changes);
+    const shouldLog = changes > 0 || previewChanges > 0 || previousName !== undefined;
+    if (shouldLog) {
       this.options.logger?.debug(
         {
           groupId: member.groupId,
           groupProtocolId: member.groupProtocolId,
           memberProtocolId: member.memberProtocolId,
           displayName: member.displayName,
-          changedMessages: changes
+          previousDisplayName: previousName,
+          changedMessages: changes,
+          changedConversationPreviews: previewChanges
         },
-        "backfilled message sender names from group member"
+        changes > 0 || previewChanges > 0
+          ? "backfilled message sender names from group member"
+          : "group member sender backfill made no changes"
       );
     }
   }
@@ -1166,8 +1183,29 @@ export class SqliteStore implements MessageStore {
 
     const members = groupMemberInputsFromContact(contact, accountId);
     if (members.length === 0) {
+      this.options.logger?.debug(
+        {
+          groupId: conversationIdFromContact(contact),
+          groupProtocolId: contact.protocolId,
+          rawMemberCount: groupMemberCountFromRaw(contact.raw),
+          rawMemberListSize:
+            contact.raw && typeof contact.raw === "object" && Array.isArray((contact.raw as { MemberList?: unknown }).MemberList)
+              ? (contact.raw as { MemberList: unknown[] }).MemberList.length
+              : undefined
+        },
+        "group contact contained no usable member names"
+      );
       return;
     }
+    this.options.logger?.trace(
+      {
+        groupId: conversationIdFromContact(contact),
+        groupProtocolId: contact.protocolId,
+        memberCount: members.length,
+        sampleMembers: members.slice(0, 8).map((member) => summarizeGroupMemberNames(member))
+      },
+      "extracted group members from contact"
+    );
 
     let changedMessages = 0;
     for (const member of members) {
@@ -1887,7 +1925,20 @@ function stabilizeContactForUpsert(contact: ContactInput, existing: ContactRecor
 }
 
 function stabilizeGroupMemberForUpsert(member: GroupMemberInput, existing: GroupMemberRecord | undefined): GroupMemberInput {
-  const raw = member.raw ?? existing?.raw;
+  const incomingHasGroupDisplayName = hasGroupMemberDisplayName(member);
+  const existingHasGroupDisplayName = existing ? hasGroupMemberDisplayName(existing) : false;
+  const raw = incomingHasGroupDisplayName ? member.raw ?? existing?.raw : existing?.raw ?? member.raw;
+  if (existing && existingHasGroupDisplayName && !incomingHasGroupDisplayName) {
+    return {
+      ...member,
+      groupProtocolId: member.groupProtocolId ?? existing.groupProtocolId,
+      displayName: existing.displayName,
+      remarkName: member.remarkName ?? existing.remarkName,
+      nickName: member.nickName ?? existing.nickName,
+      alias: member.alias ?? existing.alias,
+      raw
+    };
+  }
   if (!existing || isUsefulSenderName(member.displayName) || !isUsefulSenderName(existing.displayName)) {
     return {
       ...member,
@@ -1904,6 +1955,71 @@ function stabilizeGroupMemberForUpsert(member: GroupMemberInput, existing: Group
     nickName: member.nickName ?? existing.nickName,
     alias: member.alias ?? existing.alias,
     raw
+  };
+}
+
+function hasGroupMemberDisplayName(member: Pick<GroupMemberInput | GroupMemberRecord, "raw" | "displayName">): boolean {
+  const raw = member.raw;
+  if (!raw || typeof raw !== "object") {
+    return false;
+  }
+  const record = raw as Record<string, unknown>;
+  const displayName = cleanGroupMemberName(record.DisplayName);
+  return !!displayName && displayName === member.displayName;
+}
+
+function groupMemberUpsertNeedsDebug(
+  incoming: GroupMemberInput,
+  existing: GroupMemberRecord | undefined,
+  saved: GroupMemberInput
+): boolean {
+  return (
+    incoming.displayName !== saved.displayName ||
+    (existing !== undefined && existing.displayName !== saved.displayName) ||
+    hasGroupMemberDisplayName(incoming) ||
+    hasGroupMemberDisplayName(saved)
+  );
+}
+
+function summarizeGroupMemberUpsert(
+  incoming: GroupMemberInput,
+  existing: GroupMemberRecord | undefined,
+  saved: GroupMemberInput
+): Record<string, unknown> {
+  return {
+    id: saved.id,
+    groupId: saved.groupId,
+    groupProtocolId: saved.groupProtocolId,
+    memberProtocolId: saved.memberProtocolId,
+    incoming: summarizeGroupMemberNames(incoming),
+    existing: existing ? summarizeGroupMemberNames(existing) : undefined,
+    saved: summarizeGroupMemberNames(saved),
+    incomingHasGroupDisplayName: hasGroupMemberDisplayName(incoming),
+    existingHasGroupDisplayName: existing ? hasGroupMemberDisplayName(existing) : undefined,
+    savedHasGroupDisplayName: hasGroupMemberDisplayName(saved)
+  };
+}
+
+function summarizeGroupMemberNames(member: Pick<GroupMemberInput | GroupMemberRecord, "displayName" | "remarkName" | "nickName" | "alias" | "raw">): Record<string, unknown> {
+  return {
+    displayName: member.displayName,
+    remarkName: member.remarkName,
+    nickName: member.nickName,
+    alias: member.alias,
+    rawNames: summarizeRawGroupMemberNames(member.raw)
+  };
+}
+
+function summarizeRawGroupMemberNames(raw: unknown): Record<string, unknown> | undefined {
+  if (!raw || typeof raw !== "object") {
+    return undefined;
+  }
+  const value = raw as Record<string, unknown>;
+  return {
+    DisplayName: cleanGroupMemberName(value.DisplayName),
+    RemarkName: cleanGroupMemberName(value.RemarkName),
+    NickName: cleanGroupMemberName(value.NickName),
+    Alias: cleanGroupMemberName(value.Alias)
   };
 }
 
@@ -1942,8 +2058,8 @@ function groupMemberInputsFromContact(contact: Pick<ContactRecord, "id" | "proto
       continue;
     }
     const displayName = firstUsefulGroupMemberName(
-      record.RemarkName,
       record.DisplayName,
+      record.RemarkName,
       record.NickName,
       record.Alias
     );

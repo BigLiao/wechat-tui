@@ -712,6 +712,122 @@ describe("SqliteStore", () => {
     await store.close();
   });
 
+  it("prefers group member display names over member nicknames when backfilling senders", async () => {
+    const store = await SqliteStore.open(tempDb());
+    await store.setActiveAccount(accountA);
+    const group: ContactInput = {
+      id: contactId("group", ["project"]),
+      protocolId: "@@project",
+      kind: "group",
+      displayName: "Project"
+    };
+    const conversation = conversationFromContact(group);
+    const fallbackMember = await store.upsertGroupMember({
+      id: groupMemberId(conversation.id, "@alice"),
+      groupId: conversation.id,
+      groupProtocolId: group.protocolId,
+      memberProtocolId: "@alice",
+      displayName: "Ckey",
+      nickName: "Ckey"
+    });
+
+    await store.saveMessage(
+      {
+        id: localMessageId([conversation.id, "@alice", "nickname first"]),
+        conversationId: conversation.id,
+        senderId: fallbackMember.id,
+        senderKind: "group-member",
+        senderProtocolId: "@alice",
+        senderName: fallbackMember.displayName,
+        isSelf: false,
+        content: "nickname first",
+        type: "text",
+        timestamp: 1_700_000_000_000
+      },
+      conversation,
+      true
+    );
+
+    await store.upsertContact({
+      ...group,
+      raw: {
+        UserName: "@@project",
+        MemberList: [
+          {
+            UserName: "@alice",
+            DisplayName: "大剑断龙车",
+            RemarkName: "Ckey",
+            NickName: "Ckey"
+          }
+        ]
+      }
+    });
+
+    expect((await store.listMessages(conversation.id))[0]?.senderName).toBe("大剑断龙车");
+    expect((await store.findConversationById(conversation.id))?.lastMessageSenderName).toBe("大剑断龙车");
+    await store.close();
+  });
+
+  it("does not downgrade group member display names with later fallback nicknames", async () => {
+    const store = await SqliteStore.open(tempDb());
+    await store.setActiveAccount(accountA);
+    const group: ContactInput = {
+      id: contactId("group", ["project"]),
+      protocolId: "@@project",
+      kind: "group",
+      displayName: "Project"
+    };
+    const conversation = conversationFromContact(group);
+    const memberId = groupMemberId(conversation.id, "@alice");
+    const scopedMember = await store.upsertGroupMember({
+      id: memberId,
+      groupId: conversation.id,
+      groupProtocolId: group.protocolId,
+      memberProtocolId: "@alice",
+      displayName: "大剑断龙车",
+      nickName: "Ckey",
+      raw: {
+        UserName: "@alice",
+        DisplayName: "大剑断龙车",
+        NickName: "Ckey"
+      }
+    });
+
+    await store.saveMessage(
+      {
+        id: localMessageId([conversation.id, "@alice", "group name first"]),
+        conversationId: conversation.id,
+        senderId: scopedMember.id,
+        senderKind: "group-member",
+        senderProtocolId: "@alice",
+        senderName: scopedMember.displayName,
+        isSelf: false,
+        content: "group name first",
+        type: "text",
+        timestamp: 1_700_000_000_000
+      },
+      conversation,
+      true
+    );
+
+    await store.upsertGroupMember({
+      id: memberId,
+      groupId: conversation.id,
+      groupProtocolId: group.protocolId,
+      memberProtocolId: "@alice",
+      displayName: "Ckey",
+      nickName: "Ckey",
+      raw: {
+        UserName: "@alice",
+        NickName: "Ckey"
+      }
+    });
+
+    expect((await store.listMessages(conversation.id))[0]?.senderName).toBe("大剑断龙车");
+    expect((await store.findConversationById(conversation.id))?.lastMessageSenderName).toBe("大剑断龙车");
+    await store.close();
+  });
+
   it("preserves existing contact raw metadata when a later sparse upsert has no raw", async () => {
     const store = await SqliteStore.open(tempDb());
     await store.setActiveAccount(accountA);
