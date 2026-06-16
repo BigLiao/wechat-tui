@@ -224,6 +224,10 @@ function isGlobalChatKey(key: UiKey, app: WechatApp): boolean {
   if (key.ctrl === true || key.name === "escape") {
     return true;
   }
+  // When autocomplete is active (typing a / command), let Editor handle completion and selection.
+  if ((key.name === "tab" || key.name === "up" || key.name === "down") && app.isChatAutocompleteActive()) {
+    return false;
+  }
   if (key.name === "tab" && app.isChatInputEmpty()) {
     return true;
   }
@@ -232,10 +236,6 @@ function isGlobalChatKey(key: UiKey, app: WechatApp): boolean {
   }
   if (app.isConversationSwitcherActive() && (key.name === "left" || key.name === "right" || isEnterKey(key))) {
     return true;
-  }
-  // When autocomplete is active (typing a / command), let Editor handle up/down
-  if ((key.name === "up" || key.name === "down") && app.isChatAutocompleteActive()) {
-    return false;
   }
   return key.name === "up" || key.name === "down";
 }

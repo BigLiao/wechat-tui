@@ -164,6 +164,44 @@ describe("WorkbenchTerminalRenderer", () => {
     expect(events).toEqual([{ type: "key", key: { sequence: "\t", name: "tab" } }]);
   });
 
+  it("lets slash command autocomplete handle tab before conversation switching", () => {
+    const terminal = new InputTerminal();
+    const events: UiEvent[] = [];
+    const renderer = new WorkbenchTerminalRenderer(terminal);
+
+    renderer.start((event) => events.push(event), () => {});
+    renderer.render(
+      baseState({
+        view: "chat",
+        activeConversation: {
+          id: "conversation:boss",
+          protocolId: "@boss",
+          kind: "private",
+          title: "Boss",
+          unreadCount: 0,
+          updatedAt: 1_700_000_000_000
+        },
+        chatInput: "/",
+        switcherConversations: [
+          {
+            id: "conversation:project",
+            protocolId: "@@project",
+            kind: "group",
+            title: "Project A",
+            unreadCount: 2,
+            updatedAt: 1_700_000_100_000
+          }
+        ],
+        totalUnreadCount: 2
+      })
+    );
+
+    terminal.send("\t");
+    renderer.stop();
+
+    expect(events).not.toContainEqual({ type: "key", key: { sequence: "\t", name: "tab" } });
+  });
+
   it("consumes tab before autocomplete when the chat input is empty and there are no unread conversations", () => {
     const terminal = new InputTerminal();
     const events: UiEvent[] = [];
