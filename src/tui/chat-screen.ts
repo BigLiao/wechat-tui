@@ -23,9 +23,9 @@ export class ChatScreen {
       errorLines.push(fit(`  ${theme.error(state.errorMessage)}`, width));
     }
 
-    // Unread from other conversations
-    const otherUnread = unreadSummary(state);
-    const otherUnreadLines = otherUnread ? ["", fit(`  ${otherUnread}`, width)] : [];
+    // Conversation switch targets from unread chats and the remembered return chat.
+    const switcherSummary = conversationSwitcherSummary(state);
+    const switcherLines = switcherSummary ? ["", fit(`  ${switcherSummary}`, width)] : [];
 
     // Fixed bottom: status bar + editor
     const editorLines = this.editor.render(width);
@@ -38,23 +38,21 @@ export class ChatScreen {
     // Content: messages, sized to the remaining viewport above the fixed bottom.
     const messageRows = Math.max(
       1,
-      rows - headerLines.length - errorLines.length - otherUnreadLines.length - bottomLines.length
+      rows - headerLines.length - errorLines.length - switcherLines.length - bottomLines.length
     );
     const contentLines = this.messages.render(state, width, messageRows, fileRegistry);
 
     // Layout: header → fill → error + content → bottom (bottom-aligned)
     const fixedCount =
-      headerLines.length + errorLines.length + contentLines.length + otherUnreadLines.length + bottomLines.length;
+      headerLines.length + errorLines.length + contentLines.length + switcherLines.length + bottomLines.length;
     const fill = fillLines(rows, fixedCount, 0, width);
 
-    return [...headerLines, ...fill, ...errorLines, ...contentLines, ...otherUnreadLines, ...bottomLines];
+    return [...headerLines, ...fill, ...errorLines, ...contentLines, ...switcherLines, ...bottomLines];
   }
 }
 
-function unreadSummary(state: RenderState): string {
-  const conversations = state.switcherConversations.filter(
-    (c) => c.id !== state.activeConversation?.id && (state.conversationSwitcherActive || c.unreadCount > 0)
-  );
+function conversationSwitcherSummary(state: RenderState): string {
+  const conversations = state.switcherConversations.filter((c) => c.id !== state.activeConversation?.id);
   const selectedConversationId = state.conversationSwitcherActive ? state.selectedSwitcherConversationId : undefined;
   const items = conversations
     .slice(0, state.conversationSwitcherActive ? conversations.length : 3)
