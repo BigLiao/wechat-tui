@@ -19,16 +19,46 @@
 
 ## 快速开始
 
-需要 Node.js `>=22.19.0`。该最低版本跟随 TUI 依赖 `@earendil-works/pi-tui` 的运行要求。
+### npm 安装
+
+npm 安装需要 Node.js `>=22.19.0`。该最低版本跟随 TUI 依赖 `@earendil-works/pi-tui` 的运行要求。
 
 ```bash
 npm install -g wechat-tui
+wechat-tui
 ```
 
-启动：
+### 二进制安装
+
+也可以在 [GitHub Release](https://github.com/BigLiao/wechat-tui/releases) 下载对应平台的单文件二进制包。二进制内置 Node.js 运行时和运行依赖，不需要本机安装 Node.js。
+
+```text
+wechat-tui-v<version>-linux-x64.tar.gz
+wechat-tui-v<version>-linux-arm64.tar.gz
+wechat-tui-v<version>-macos-x64.tar.gz
+wechat-tui-v<version>-macos-arm64.tar.gz
+wechat-tui-v<version>-windows-x64.zip
+```
+
+Linux / macOS：
 
 ```bash
-wechat-tui
+tar -xzf wechat-tui-v<version>-linux-x64.tar.gz
+chmod +x wechat-tui-v<version>-linux-x64
+./wechat-tui-v<version>-linux-x64
+```
+
+macOS arm64 请把文件名替换为 `wechat-tui-v<version>-macos-arm64`。如果系统提示下载的程序无法打开，可以先移除下载隔离标记：
+
+```bash
+xattr -dr com.apple.quarantine ./wechat-tui-v<version>-macos-arm64
+```
+
+Windows：
+
+```powershell
+Expand-Archive .\wechat-tui-v<version>-windows-x64.zip
+.\wechat-tui-v<version>-windows-x64\wechat-tui-v<version>-windows-x64.exe
 ```
 
 启动后会显示二维码登录界面。扫码并确认登录后，会进入最近会话列表。
@@ -159,7 +189,10 @@ npm run dev -- --mock   # 使用 mock 协议启动，不需要微信登录
 npm run typecheck       # 类型检查
 npm test                # 运行测试
 npm run build           # 编译到 dist/
+npm run package:binary  # 打包当前平台单文件二进制到 artifacts/
 ```
+
+由于 SQLite 驱动包含原生模块，二进制需要在目标平台和架构一致的环境中打包；发布 CI 会在对应 runner 上分别生成各平台产物。
 
 ## License
 

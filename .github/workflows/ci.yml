@@ -29,3 +29,12 @@ jobs:
 
       - name: Build
         run: npm run build
+
+      - name: Package Linux binary
+        run: npm run package:binary -- --target node22-linux-x64
+
+      - name: Smoke test packaged binary
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          BINARY="artifacts/wechat-tui-v${VERSION}-linux-x64"
+          PKG_NATIVE_CACHE_PATH="${PWD}/.tmp/pkg-native-cache" "${BINARY}" --version

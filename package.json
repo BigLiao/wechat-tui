@@ -38,6 +38,7 @@
   "scripts": {
     "build": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && tsc -p tsconfig.json",
     "dev": "tsx src/index.ts",
+    "package:binary": "node scripts/package-binary.mjs",
     "start": "node dist/index.js",
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.test.json --noEmit"
@@ -54,6 +55,8 @@
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
+    "@yao-pkg/pkg": "^6.20.0",
+    "esbuild": "^0.28.1",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",
     "vitest": "^4.1.7"

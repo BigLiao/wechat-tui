@@ -11,8 +11,10 @@ permissions:
   id-token: write
 
 jobs:
-  publish:
+  verify:
     runs-on: ubuntu-latest
+    outputs:
+      npm-tag: ${{ steps.npm-tag.outputs.tag }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -57,14 +59,129 @@ jobs:
             echo "tag=latest" >> "${GITHUB_OUTPUT}"
           fi
 
+  package-binaries:
+    needs: verify
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: node22-linux-x64
+            suffix: linux-x64
+          - os: ubuntu-24.04-arm
+            target: node22-linux-arm64
+            suffix: linux-arm64
+          - os: macos-15-intel
+            target: node22-macos-x64
+            suffix: macos-x64
+          - os: macos-15
+            target: node22-macos-arm64
+            suffix: macos-arm64
+          - os: windows-2025
+            target: node22-win-x64
+            suffix: windows-x64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.19.0"
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Build
+        run: npm run build
+
+      - name: Package binary
+        run: npm run package:binary -- --target ${{ matrix.target }}
+
+      - name: Smoke test packaged binary
+        if: runner.os != 'Windows'
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          BINARY="artifacts/wechat-tui-v${VERSION}-${{ matrix.suffix }}"
+          PKG_NATIVE_CACHE_PATH="${PWD}/.tmp/pkg-native-cache" "${BINARY}" --version
+
+      - name: Smoke test packaged binary
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $version = node -p "require('./package.json').version"
+          $binary = "artifacts/wechat-tui-v$version-${{ matrix.suffix }}.exe"
+          $env:PKG_NATIVE_CACHE_PATH = Join-Path $pwd ".tmp/pkg-native-cache"
+          & (Resolve-Path $binary).Path --version
+
+      - name: Archive binary
+        if: runner.os != 'Windows'
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          BINARY_NAME="wechat-tui-v${VERSION}-${{ matrix.suffix }}"
+          tar -czf "artifacts/${BINARY_NAME}.tar.gz" -C artifacts "${BINARY_NAME}"
+
+      - name: Archive binary
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $version = node -p "require('./package.json').version"
+          $binary = "artifacts/wechat-tui-v$version-${{ matrix.suffix }}.exe"
+          $archive = "artifacts/wechat-tui-v$version-${{ matrix.suffix }}.zip"
+          Compress-Archive -Force -Path $binary -DestinationPath $archive
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wechat-tui-${{ matrix.suffix }}
+          path: |
+            artifacts/*.tar.gz
+            artifacts/*.zip
+
+  publish:
+    needs:
+      - verify
+      - package-binaries
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.19.0"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Build
+        run: npm run build
+
       - name: Publish to npm
-        run: npm publish --provenance --access public --tag "${{ steps.npm-tag.outputs.tag }}"
+        run: npm publish --provenance --access public --tag "${{ needs.verify.outputs.npm-tag }}"
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
+  release:
+    needs:
+      - verify
+      - publish
+      - package-binaries
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download binary artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
       - name: Create GitHub Release
-        if: github.event_name == 'push'
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
-          prerelease: ${{ steps.npm-tag.outputs.tag != 'latest' }}
+          prerelease: ${{ needs.verify.outputs.npm-tag != 'latest' }}
+          files: release-assets/*

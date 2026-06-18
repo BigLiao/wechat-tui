@@ -15,6 +15,7 @@
 ```bash
 npm run dev -- --mock   # 开发模式，使用 mock 协议启动
 npm run build           # 编译 TypeScript -> dist/
+npm run package:binary  # 打包当前平台单文件二进制到 artifacts/
 npm run start           # 运行 dist/index.js
 npm run typecheck       # TypeScript 类型检查
 npm test                # 运行测试
@@ -45,10 +46,14 @@ npm run build
 │   │   └── workbench-renderer.ts # 终端输入输出桥接
 │   ├── tui/                      # TUI 页面和组件渲染
 │   └── util/                     # 通用工具函数
+├── scripts/
+│   └── package-binary.mjs        # 单文件二进制打包脚本
 ├── test/                         # 单元测试和渲染测试
+├── pkg.config.mjs                # @yao-pkg/pkg 打包资源配置
 └── .github/
     └── workflows/
-        └── publish.yml           # npm 发布和 GitHub Release
+        ├── ci.yml                # PR 类型检查、测试、构建和 Linux 二进制烟测
+        └── publish.yml           # npm 发布、二进制矩阵打包和 GitHub Release
 ```
 
 ## 数据和日志
@@ -63,6 +68,7 @@ npm run build
 
 - 协议层和业务层保持分离：协议适配、原始数据解析和归一化放在 `src/protocol/*`，不要把协议细节泄漏到 UI 层。
 - UI 层和状态/持久化保持分离：终端渲染、组件布局和交互展示放在 `src/tui/*`、`src/ui/*`，不要让 store 依赖 UI。
+- 二进制打包依赖 `sqlite3` 原生模块，必须在目标平台和架构一致的环境中运行 `npm run package:binary`，不要跨平台复用本机 `node_modules`。
 - 新增或修改行为时补充对应测试；影响共享流程时优先增加集成层或渲染层测试。
 - 修改 CLI 参数、用户可见文案、项目结构、数据路径或发布流程后，检查 `README.md` 和 `AGENTS.md` 是否需要同步更新。
 
@@ -131,6 +137,7 @@ git diff "${PREV_TAG}..HEAD"
 npm run typecheck
 npm test
 npm run build
+npm run package:binary
 
 # 7. 创建发布提交和 tag
 git add package.json CHANGELOG.md
@@ -142,6 +149,7 @@ git push && git push --tags
 ```
 
 推送 `v*` tag 后，GitHub Actions 会自动构建和发布到 npm 仓库。
+发布 workflow 还会在 Linux x64/arm64、macOS x64/arm64 和 Windows x64 runner 上分别生成单文件二进制，并把归档文件上传到 GitHub Release。
 
 ### CHANGELOG.md 格式
 

@@ -12,6 +12,15 @@
 
 ## [Unreleased]
 
+### Added
+
+- 新增单文件二进制打包脚本，可为当前平台生成内置 Node.js 运行时和依赖的可执行文件。
+- 发布流程新增 Linux x64/arm64、macOS x64/arm64 和 Windows x64 二进制产物，并上传到 GitHub Release。
+
+### Internal
+
+- PR CI 增加 Linux x64 二进制打包和 `--version` 烟测。
+
 ## [0.5.0] - 2026-06-15
 
 ### Added

@@ -11,3 +11,8 @@ declare module "qrcode-terminal" {
 
   export default qrcode;
 }
+
+declare module "wechat4u" {
+  const Wechat: new (botData?: unknown) => unknown;
+  export default Wechat;
+}

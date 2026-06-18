@@ -1,9 +1,9 @@
 import { EventEmitter } from "node:events";
-import { createRequire } from "node:module";
 import { createReadStream } from "node:fs";
 import { access } from "node:fs/promises";
 import { basename } from "node:path";
 import type { Logger } from "pino";
+import WechatConstructor from "wechat4u";
 import type {
   ConnectionState,
   ContactInput,
@@ -21,7 +21,6 @@ import { cleanText, decodeHtml } from "../util/text.js";
 import { formatWechatRecallMessage } from "../util/wechat-recall.js";
 import { preview, summarizeContacts, summarizeIncomingMessage, summarizeRawWechatMessage } from "../logging.js";
 
-const require = createRequire(import.meta.url);
 const WECHAT4U_CONTACT_REFRESH_COOLDOWN_MS = 5 * 60 * 1000;
 
 type RawWechatBot = EventEmitter & {
@@ -280,7 +279,7 @@ export class Wechat4uAdapter extends EventEmitter implements WeChatProtocol {
   }
 
   private createBot(sessionData?: unknown): RawWechatBot {
-    const Wechat = require("wechat4u") as new (botData?: unknown) => RawWechatBot;
+    const Wechat = WechatConstructor as new (botData?: unknown) => RawWechatBot;
     const bot = new Wechat(sessionData);
     // wechat4u defaults to sending a periodic "heartbeat" text to filehelper.
     // It is a protocol keepalive, not a user-visible chat message.
