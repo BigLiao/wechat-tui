@@ -173,6 +173,41 @@ jobs:
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Extract release notes from changelog
+        id: release-notes
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          NOTES_FILE="${RUNNER_TEMP}/release-notes.md"
+          awk -v version="${VERSION}" '
+            BEGIN {
+              heading = "## [" version "]"
+              in_section = 0
+              found = 0
+            }
+            /^## \[/ {
+              if (in_section) {
+                exit
+              }
+              if (index($0, heading) == 1) {
+                in_section = 1
+                found = 1
+              }
+            }
+            in_section {
+              print
+            }
+            END {
+              if (!found) {
+                print "Could not find changelog section for " version > "/dev/stderr"
+                exit 1
+              }
+            }
+          ' CHANGELOG.md > "${NOTES_FILE}"
+          echo "path=${NOTES_FILE}" >> "${GITHUB_OUTPUT}"
+
       - name: Download binary artifacts
         uses: actions/download-artifact@v4
         with:
@@ -182,6 +217,6 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          generate_release_notes: true
+          body_path: ${{ steps.release-notes.outputs.path }}
           prerelease: ${{ needs.verify.outputs.npm-tag != 'latest' }}
           files: release-assets/*
