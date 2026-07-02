@@ -9,6 +9,7 @@ import type { UiEvent } from "../../types.js";
 import { imageFilePathFromPastedText } from "../../util/path-input.js";
 
 const COMMANDS = [
+  { name: "emoticons", description: "Open WeChat emoticon picker" },
   { name: "send", description: "Send a file (image, video, doc)" },
   { name: "view", description: "Open a file by hash (e.g. /view a1c1)" }
 ];
@@ -46,7 +47,7 @@ export class ChatEditor implements Component {
     this.focusTarget.setAutocompleteProvider(new CombinedAutocompleteProvider(COMMANDS, process.cwd()));
     this.focusTarget.onChange = (text) => {
       if (!this.suppressChange) {
-        this.onEvent({ type: "chat-change", text });
+        this.onEvent({ type: "chat-change", text, cursorIndex: this.cursorIndex() });
       }
     };
     this.focusTarget.onSubmit = (text) => {
@@ -59,12 +60,12 @@ export class ChatEditor implements Component {
     // put it back into the editor instead of submitting — let the user type the argument.
     if (/^\/send\s*$/.test(text)) {
       this.syncText("/send ");
-      this.onEvent({ type: "chat-change", text: "/send " });
+      this.onEvent({ type: "chat-change", text: "/send ", cursorIndex: this.cursorIndex() });
       return;
     }
     if (/^\/view\s*$/.test(text)) {
       this.syncText("/view ");
-      this.onEvent({ type: "chat-change", text: "/view " });
+      this.onEvent({ type: "chat-change", text: "/view ", cursorIndex: this.cursorIndex() });
       return;
     }
 
@@ -84,25 +85,64 @@ export class ChatEditor implements Component {
       }
       const remainingText = text.replace(IMAGE_MARKER_REGEX, "").trim();
       if (remainingText) {
-        this.onEvent({ type: "chat-submit", text: remainingText });
+        this.onEvent({ type: "chat-submit", text: remainingText, cursorIndex: remainingText.length });
       } else {
-        this.onEvent({ type: "chat-submit", text: "" });
+        this.onEvent({ type: "chat-submit", text: "", cursorIndex: 0 });
       }
     } else {
-      this.onEvent({ type: "chat-submit", text });
+      this.onEvent({ type: "chat-submit", text, cursorIndex: this.cursorIndex() });
     }
   }
 
-  syncText(text: string): void {
+  syncText(text: string, cursorIndex?: number): void {
     if (this.focusTarget.getText() === text) {
+      if (cursorIndex !== undefined) {
+        this.setCursorIndex(cursorIndex);
+      }
       return;
     }
     this.suppressChange = true;
     try {
       this.focusTarget.setText(text);
+      if (cursorIndex !== undefined) {
+        this.setCursorIndex(cursorIndex);
+      }
     } finally {
       this.suppressChange = false;
     }
+  }
+
+  cursorIndex(): number {
+    const cursor = this.focusTarget.getCursor();
+    const lines = this.focusTarget.getLines();
+    let index = 0;
+    for (let line = 0; line < cursor.line; line += 1) {
+      index += (lines[line]?.length ?? 0) + 1;
+    }
+    return clamp(index + cursor.col, 0, this.focusTarget.getText().length);
+  }
+
+  private setCursorIndex(index: number): void {
+    const text = this.focusTarget.getText();
+    const target = clamp(index, 0, text.length);
+    const lines = this.focusTarget.getLines();
+    let remaining = target;
+    for (let line = 0; line < lines.length; line += 1) {
+      const lineLength = lines[line]?.length ?? 0;
+      if (remaining <= lineLength) {
+        this.setEditorCursor(line, remaining);
+        return;
+      }
+      remaining -= lineLength + 1;
+    }
+    const lastLine = Math.max(0, lines.length - 1);
+    this.setEditorCursor(lastLine, lines[lastLine]?.length ?? 0);
+  }
+
+  private setEditorCursor(line: number, col: number): void {
+    const editor = this.focusTarget as unknown as { state: { cursorLine: number; cursorCol: number } };
+    editor.state.cursorLine = line;
+    editor.state.cursorCol = col;
   }
 
   invalidate(): void {
@@ -147,4 +187,8 @@ export class ChatEditor implements Component {
   handleInput(data: string): void {
     this.focusTarget.handleInput(data);
   }
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(Math.max(value, min), max);
 }

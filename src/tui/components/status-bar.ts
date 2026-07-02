@@ -21,7 +21,8 @@ export class StatusBar {
 // ─── Hint sets per view ───────────────────────────────────────────────────────
 
 export const HINTS_CONVERSATION = ["↑↓ select", "⏎ open", "/ commands"];
-export const HINTS_CHAT = ["⏎ send", "Esc back", "↑↓ scroll", "/ Commands"];
+export const HINTS_CHAT = ["⏎ send", "Esc back", "↑↓ scroll", "/emoticons"];
 export const HINTS_CHAT_SWITCHER = ["⏎ confirm", "Esc cancel"];
+export const HINTS_EMOTICON_PICKER = ["⏎ insert", "Esc cancel", "↑↓←→ select", "🔍 输入搜索"];
 export const HINTS_SEARCH = ["↑↓ select", "⏎ open", "Esc back"];
 export const HINTS_LOGIN = ["scan QR to login", "q quit"];

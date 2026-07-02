@@ -75,6 +75,11 @@ export class WorkbenchTerminalRenderer implements WorkbenchRenderer {
         return undefined;
       }
 
+      if (this.app?.isChatView() && this.app.isEmoticonPickerActive()) {
+        onEvent({ type: "key", key, chatCursorIndex: this.app.chatCursorIndex() });
+        return { consume: true };
+      }
+
       if (
         this.app?.isChatView() &&
         key.name === "tab" &&
@@ -221,6 +226,9 @@ function printableData(data: string): string {
 }
 
 function isGlobalChatKey(key: UiKey, app: WechatApp): boolean {
+  if (app.isEmoticonPickerActive()) {
+    return true;
+  }
   if (key.ctrl === true || key.name === "escape") {
     return true;
   }

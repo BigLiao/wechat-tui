@@ -802,6 +802,69 @@ describe("WeChatRuntime", () => {
     await store.close();
   });
 
+  it("opens the WeChat emoticon picker, searches by pinyin, and inserts the selected text", async () => {
+    const store = await SqliteStore.open(tempDb());
+    const protocol = new MockProtocol();
+    const renderer = new FakeRenderer();
+    const runtime = new WeChatRuntime(protocol, store, renderer, { initialHistoryLimit: 10 });
+
+    await runtime.start();
+    protocol.emitIncoming("Boss", "hello", 1_700_000_000_000);
+    await flushRender();
+    await runtime.handleKey(key.enter());
+
+    await runtime.handleUiEvent({ type: "chat-submit", text: "/emoticons" });
+    expect(renderer.latest.emoticonPicker?.sections.map((section) => section.title)).toEqual(["所有"]);
+
+    await pressText(runtime, "wl");
+    expect(renderer.latest.emoticonPicker?.query).toBe("wl");
+    expect(renderer.latest.emoticonPicker?.sections.flatMap((section) => section.items)).toContain("[捂脸]");
+
+    await runtime.handleKey(key.enter());
+    expect(renderer.latest.emoticonPicker).toBeUndefined();
+    expect(renderer.latest.chatInput).toBe("[捂脸]");
+    expect(renderer.latest.chatCursorIndex).toBe("[捂脸]".length);
+    expect(renderer.latest.messages.map((message) => message.content)).not.toContain("[捂脸]");
+
+    await runtime.handleKey(key.enter());
+    expect(renderer.latest.messages.map((message) => message.content)).toContain("[捂脸]");
+
+    await runtime.handleUiEvent({ type: "chat-submit", text: "/emoticons" });
+    expect(renderer.latest.emoticonPicker?.sections[0]?.title).toBe("最近使用");
+    expect(renderer.latest.emoticonPicker?.sections[0]?.items[0]).toBe("[捂脸]");
+
+    await runtime.handleKey(key.down());
+    expect(renderer.latest.emoticonPicker?.sections[1]?.title).toBe("所有");
+    expect(renderer.latest.emoticonPicker?.sections[1]?.items[0]).toBe("[微笑]");
+    expect(renderer.latest.emoticonPicker?.selectedIndex).toBe(1);
+
+    await runtime.handleKey(key.escape());
+    expect(renderer.latest.view).toBe("chat");
+    expect(renderer.latest.emoticonPicker).toBeUndefined();
+    await store.close();
+  });
+
+  it("inserts selected emoticons at the chat cursor position", async () => {
+    const store = await SqliteStore.open(tempDb());
+    const protocol = new MockProtocol();
+    const renderer = new FakeRenderer();
+    const runtime = new WeChatRuntime(protocol, store, renderer, { initialHistoryLimit: 10 });
+
+    await runtime.start();
+    protocol.emitIncoming("Boss", "hello", 1_700_000_000_000);
+    await flushRender();
+    await runtime.handleKey(key.enter());
+
+    await runtime.handleUiEvent({ type: "chat-submit", text: "/emoticons" });
+    await runtime.handleUiEvent({ type: "chat-change", text: "ab", cursorIndex: 1 });
+    await runtime.handleUiEvent({ type: "key", key: key.enter(), chatCursorIndex: 1 });
+
+    expect(renderer.latest.chatInput).toBe("a[微笑]b");
+    expect(renderer.latest.chatCursorIndex).toBe("a[微笑]".length);
+    expect(renderer.latest.messages.map((message) => message.content)).not.toContain("a[微笑]b");
+    await store.close();
+  });
+
   it("navigates to search via the search item in conversation list", async () => {
     const store = await SqliteStore.open(tempDb());
     const protocol = new MockProtocol();

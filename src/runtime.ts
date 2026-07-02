@@ -16,6 +16,7 @@ import type {
   ContactInput,
   ContactRecord,
   ContactKind,
+  EmoticonPickerRenderState,
   ConversationInput,
   ConversationRecord,
   GroupMemberInput,
@@ -39,6 +40,12 @@ import { MediaCache, extensionFromContentType } from "./util/media-cache.js";
 import { openWithSystem, revealInFileManager } from "./util/open.js";
 import { normalizeUserFilePath } from "./util/path-input.js";
 import { createStartupRenderState } from "./startup-state.js";
+import {
+  EMOTICON_GRID_COLUMNS,
+  filterRecentWechatEmoticons,
+  filterWechatEmoticons,
+  rememberWechatEmoticon
+} from "./util/wechat-emoticons.js";
 
 export interface RuntimeOptions {
   initialHistoryLimit?: number;
@@ -64,10 +71,15 @@ export class WeChatRuntime extends EventEmitter {
   private messageScrollOffset = 0;
   private searchKeyword = "";
   private chatInput = "";
+  private chatCursorIndex = 0;
   private conversationQuery = "";
   private conversationFocus: "list" | "input" = "list";
   private selectedSwitcherConversationId?: string;
   private tabReturnConversationId?: string;
+  private emoticonPickerActive = false;
+  private emoticonQuery = "";
+  private selectedEmoticonIndex = 0;
+  private recentEmoticons: string[] = [];
   private statusMessage?: string;
   private errorMessage?: string;
   private updateInfo?: UpdateInfo;
@@ -141,6 +153,9 @@ export class WeChatRuntime extends EventEmitter {
 
   async handleUiEvent(event: UiEvent): Promise<void> {
     if (event.type === "key") {
+      if (event.chatCursorIndex !== undefined) {
+        this.chatCursorIndex = clamp(event.chatCursorIndex, 0, this.chatInput.length);
+      }
       await this.handleKey(event.key);
       return;
     }
@@ -174,9 +189,11 @@ export class WeChatRuntime extends EventEmitter {
     try {
       if (event.type === "chat-change") {
         this.chatInput = event.text;
+        this.chatCursorIndex = clamp(event.cursorIndex ?? event.text.length, 0, event.text.length);
       } else if (event.type === "file-submit") {
         await this.sendFileToActiveConversation(event.filePath);
       } else {
+        this.chatCursorIndex = clamp(event.cursorIndex ?? event.text.length, 0, event.text.length);
         await this.submitChatText(event.text);
       }
     } catch (error) {
@@ -395,10 +412,15 @@ export class WeChatRuntime extends EventEmitter {
       this.searchKeyword = "";
       this.conversationQuery = "";
       this.chatInput = "";
+      this.chatCursorIndex = 0;
       this.messageScrollOffset = 0;
       this.conversationFocus = "list";
       this.selectedSwitcherConversationId = undefined;
       this.tabReturnConversationId = undefined;
+      this.emoticonPickerActive = false;
+      this.emoticonQuery = "";
+      this.selectedEmoticonIndex = 0;
+      this.recentEmoticons = [];
       this.fileRegistry.clear();
       this.contactSnapshotApplied = false;
     }
@@ -497,6 +519,10 @@ export class WeChatRuntime extends EventEmitter {
   }
 
   private async handleChatKey(key: UiKey): Promise<void> {
+    if (this.emoticonPickerActive) {
+      await this.handleEmoticonPickerKey(key);
+      return;
+    }
     if (this.selectedSwitcherConversationId) {
       await this.handleConversationSwitcherKey(key);
       return;
@@ -509,10 +535,14 @@ export class WeChatRuntime extends EventEmitter {
       this.view = "chats";
       this.previousView = "chat";
       this.chatInput = "";
+      this.chatCursorIndex = 0;
       this.messageScrollOffset = 0;
       this.conversationFocus = "list";
       this.selectedSwitcherConversationId = undefined;
       this.tabReturnConversationId = undefined;
+      this.emoticonPickerActive = false;
+      this.emoticonQuery = "";
+      this.selectedEmoticonIndex = 0;
       this.statusMessage = "back to recent chats";
       return;
     }
@@ -529,13 +559,18 @@ export class WeChatRuntime extends EventEmitter {
       return;
     }
     if (isBackspaceKey(key)) {
-      this.chatInput = this.chatInput.slice(0, -1);
+      if (this.chatCursorIndex > 0) {
+        this.chatInput =
+          this.chatInput.slice(0, this.chatCursorIndex - 1) + this.chatInput.slice(this.chatCursorIndex);
+        this.chatCursorIndex -= 1;
+      }
       return;
     }
 
     const text = printableText(key);
     if (text) {
-      this.chatInput += text;
+      this.chatInput = this.chatInput.slice(0, this.chatCursorIndex) + text + this.chatInput.slice(this.chatCursorIndex);
+      this.chatCursorIndex += text.length;
     }
   }
 
@@ -610,6 +645,9 @@ export class WeChatRuntime extends EventEmitter {
         await this.viewFileByHash(hash);
         return;
       }
+      case "/emoticons":
+        this.openEmoticonPicker(command.slice(name.length).trim());
+        return;
       case "/logout":
         await this.protocol.logout();
         await this.store.clearSessionData();
@@ -692,9 +730,13 @@ export class WeChatRuntime extends EventEmitter {
     this.conversationQuery = "";
     this.searchKeyword = "";
     this.chatInput = "";
+    this.chatCursorIndex = 0;
     this.messageScrollOffset = 0;
     this.selectedSwitcherConversationId = undefined;
     this.tabReturnConversationId = undefined;
+    this.emoticonPickerActive = false;
+    this.emoticonQuery = "";
+    this.selectedEmoticonIndex = 0;
     await this.store.markRead(currentConversation.id);
     this.statusMessage = `opened ${currentConversation.title}`;
     this.options.logger?.info(
@@ -739,6 +781,7 @@ export class WeChatRuntime extends EventEmitter {
   private async submitChatText(rawText: string): Promise<void> {
     const text = rawText.trim();
     this.chatInput = "";
+    this.chatCursorIndex = 0;
     this.messageScrollOffset = 0;
     if (!text) {
       return;
@@ -748,6 +791,143 @@ export class WeChatRuntime extends EventEmitter {
       return;
     }
     await this.sendToActiveConversation(text);
+  }
+
+  private openEmoticonPicker(initialQuery: string): void {
+    this.emoticonPickerActive = true;
+    this.emoticonQuery = initialQuery;
+    this.selectedEmoticonIndex = 0;
+    this.selectedSwitcherConversationId = undefined;
+    this.statusMessage = initialQuery ? `emoticons: ${initialQuery}` : "select an emoticon";
+  }
+
+  private closeEmoticonPicker(statusMessage = "back to chat"): void {
+    this.emoticonPickerActive = false;
+    this.emoticonQuery = "";
+    this.selectedEmoticonIndex = 0;
+    this.statusMessage = statusMessage;
+  }
+
+  private async handleEmoticonPickerKey(key: UiKey): Promise<void> {
+    if (isEscapeKey(key)) {
+      this.closeEmoticonPicker();
+      return;
+    }
+    if (isEnterKey(key)) {
+      this.insertSelectedEmoticon();
+      return;
+    }
+    if (isBackspaceKey(key)) {
+      if (this.emoticonQuery) {
+        this.emoticonQuery = this.emoticonQuery.slice(0, -1);
+        this.selectedEmoticonIndex = 0;
+        this.clampEmoticonSelection();
+      }
+      return;
+    }
+    if (isLeftKey(key)) {
+      this.moveEmoticonSelectionHorizontal(-1);
+      return;
+    }
+    if (isRightKey(key)) {
+      this.moveEmoticonSelectionHorizontal(1);
+      return;
+    }
+    if (isUpKey(key)) {
+      this.moveEmoticonSelectionVertical(-1);
+      return;
+    }
+    if (isDownKey(key)) {
+      this.moveEmoticonSelectionVertical(1);
+      return;
+    }
+
+    const text = printableText(key);
+    if (text) {
+      this.emoticonQuery += text;
+      this.selectedEmoticonIndex = 0;
+      this.clampEmoticonSelection();
+      this.statusMessage = `emoticons: ${this.emoticonQuery}`;
+    }
+  }
+
+  private insertSelectedEmoticon(): void {
+    const selectedText = this.visibleEmoticonTexts()[this.selectedEmoticonIndex];
+    if (!selectedText) {
+      this.statusMessage = this.emoticonQuery ? "no matching emoticons" : "no emoticons";
+      return;
+    }
+    this.recentEmoticons = rememberWechatEmoticon(this.recentEmoticons, selectedText);
+    const cursorIndex = clamp(this.chatCursorIndex, 0, this.chatInput.length);
+    this.chatInput = this.chatInput.slice(0, cursorIndex) + selectedText + this.chatInput.slice(cursorIndex);
+    this.chatCursorIndex = cursorIndex + selectedText.length;
+    this.closeEmoticonPicker("emoticon inserted");
+  }
+
+  private moveEmoticonSelectionHorizontal(delta: number): void {
+    const total = this.visibleEmoticonTexts().length;
+    if (total === 0) {
+      this.selectedEmoticonIndex = 0;
+      return;
+    }
+    this.selectedEmoticonIndex = clamp(this.selectedEmoticonIndex + delta, 0, total - 1);
+  }
+
+  private moveEmoticonSelectionVertical(deltaRows: -1 | 1): void {
+    const positions = this.visibleEmoticonSectionPositions();
+    const current = positions.find(
+      (position) => this.selectedEmoticonIndex >= position.start && this.selectedEmoticonIndex < position.start + position.length
+    );
+    if (!current) {
+      this.selectedEmoticonIndex = positions[0]?.start ?? 0;
+      return;
+    }
+
+    const offset = this.selectedEmoticonIndex - current.start;
+    const row = Math.floor(offset / EMOTICON_GRID_COLUMNS);
+    const col = offset % EMOTICON_GRID_COLUMNS;
+    const targetRow = row + deltaRows;
+    const rowCount = Math.ceil(current.length / EMOTICON_GRID_COLUMNS);
+    if (targetRow >= 0 && targetRow < rowCount) {
+      const rowStart = targetRow * EMOTICON_GRID_COLUMNS;
+      const rowLength = Math.min(EMOTICON_GRID_COLUMNS, current.length - rowStart);
+      this.selectedEmoticonIndex = current.start + rowStart + Math.min(col, rowLength - 1);
+      return;
+    }
+
+    const adjacent = positions[positions.indexOf(current) + deltaRows];
+    if (adjacent) {
+      this.selectedEmoticonIndex = adjacent.start;
+    }
+  }
+
+  private clampEmoticonSelection(): void {
+    this.selectedEmoticonIndex = clampSelection(this.selectedEmoticonIndex, this.visibleEmoticonTexts().length);
+  }
+
+  private visibleEmoticonTexts(): string[] {
+    return this.visibleEmoticonSections().flatMap((section) => section.items);
+  }
+
+  private visibleEmoticonSections(): Array<{ title: string; items: string[]; emptyText?: string }> {
+    const recent = filterRecentWechatEmoticons(this.recentEmoticons, this.emoticonQuery).map((emoticon) => emoticon.text);
+    const all = filterWechatEmoticons(this.emoticonQuery).map((emoticon) => emoticon.text);
+    return [
+      ...(recent.length > 0 ? [{ title: "最近使用", items: recent }] : []),
+      { title: "所有", items: all, emptyText: "无匹配" }
+    ];
+  }
+
+  private visibleEmoticonSectionPositions(): Array<{ start: number; length: number }> {
+    let start = 0;
+    const positions: Array<{ start: number; length: number }> = [];
+    for (const section of this.visibleEmoticonSections()) {
+      if (section.items.length > 0) {
+        positions.push({ start, length: section.items.length });
+      }
+      start += section.items.length;
+    }
+    return positions;
   }
 
   private scrollChatMessages(delta: number): void {
@@ -1225,6 +1405,7 @@ export class WeChatRuntime extends EventEmitter {
     const switcherConversations = await this.listConversationSwitcherTargets(unreadConversations);
     this.syncConversationSwitcherSelection(switcherConversations);
     const totalUnreadCount = await this.store.totalUnreadCount();
+    const emoticonPicker = this.buildEmoticonPickerRenderState();
 
     this.options.logger?.trace(
       {
@@ -1277,13 +1458,31 @@ export class WeChatRuntime extends EventEmitter {
       searchResults,
       selectedSearchIndex: this.selectedSearchIndex,
       chatInput: this.chatInput,
+      chatCursorIndex: this.chatCursorIndex,
       messageScrollOffset: this.messageScrollOffset,
       commandInput: this.conversationQuery.startsWith("/") ? this.conversationQuery : "",
       totalUnreadCount,
       unreadConversations,
       switcherConversations,
       conversationSwitcherActive: !!this.selectedSwitcherConversationId,
-      selectedSwitcherConversationId: this.selectedSwitcherConversationId
+      selectedSwitcherConversationId: this.selectedSwitcherConversationId,
+      emoticonPicker
+    };
+  }
+
+  private buildEmoticonPickerRenderState(): EmoticonPickerRenderState | undefined {
+    if (!this.emoticonPickerActive) {
+      return undefined;
+    }
+    const sections = this.visibleEmoticonSections();
+    const total = sections.reduce((count, section) => count + section.items.length, 0);
+    this.selectedEmoticonIndex = clampSelection(this.selectedEmoticonIndex, total);
+    return {
+      query: this.emoticonQuery,
+      selectedIndex: this.selectedEmoticonIndex,
+      columns: EMOTICON_GRID_COLUMNS,
+      total,
+      sections
     };
   }
 

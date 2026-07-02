@@ -197,12 +197,26 @@ export interface UiKey {
 }
 
 export type UiEvent =
-  | { type: "key"; key: UiKey }
+  | { type: "key"; key: UiKey; chatCursorIndex?: number }
   | { type: "conversation-select"; index: number }
   | { type: "conversation-open"; conversationId?: string }
-  | { type: "chat-change"; text: string }
-  | { type: "chat-submit"; text: string }
+  | { type: "chat-change"; text: string; cursorIndex?: number }
+  | { type: "chat-submit"; text: string; cursorIndex?: number }
   | { type: "file-submit"; filePath: string };
+
+export interface EmoticonPickerSection {
+  title: string;
+  items: string[];
+  emptyText?: string;
+}
+
+export interface EmoticonPickerRenderState {
+  query: string;
+  selectedIndex: number;
+  columns: number;
+  total: number;
+  sections: EmoticonPickerSection[];
+}
 
 export interface RenderState {
   view: AppView;
@@ -226,6 +240,7 @@ export interface RenderState {
   searchResults: ContactRecord[];
   selectedSearchIndex: number;
   chatInput: string;
+  chatCursorIndex?: number;
   messageScrollOffset: number;
   commandInput: string;
   totalUnreadCount: number;
@@ -233,6 +248,7 @@ export interface RenderState {
   switcherConversations: ConversationRecord[];
   conversationSwitcherActive: boolean;
   selectedSwitcherConversationId?: string;
+  emoticonPicker?: EmoticonPickerRenderState;
 }
 
 export interface WorkbenchRenderer {

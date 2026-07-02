@@ -42,12 +42,14 @@ function emptyState(): RenderState {
     searchResults: [],
     selectedSearchIndex: 0,
     chatInput: "",
+    chatCursorIndex: 0,
     messageScrollOffset: 0,
     commandInput: "",
     totalUnreadCount: 0,
     unreadConversations: [],
     switcherConversations: [],
-    conversationSwitcherActive: false
+    conversationSwitcherActive: false,
+    emoticonPicker: undefined
   };
 }
 
@@ -103,8 +105,8 @@ export class WechatApp implements Component {
     if (state.view === "chat") {
       this.commandPanelVisible = false;
       this.confirmPanelVisible = false;
-      this.chatEditor.syncText(state.chatInput);
-      this.tui.setFocus(state.conversationSwitcherActive ? null : this.chatEditor.focusTarget);
+      this.chatEditor.syncText(state.chatInput, state.chatCursorIndex);
+      this.tui.setFocus(state.conversationSwitcherActive || state.emoticonPicker ? null : this.chatEditor.focusTarget);
     } else if (state.view === "chats") {
       this.syncConversationList(state);
       if (!this.commandPanelVisible && !this.confirmPanelVisible) {
@@ -190,11 +192,20 @@ export class WechatApp implements Component {
   }
 
   isChatAutocompleteActive(): boolean {
-    return this.state.view === "chat" && !this.state.conversationSwitcherActive && this.state.chatInput.startsWith("/");
+    return (
+      this.state.view === "chat" &&
+      !this.state.conversationSwitcherActive &&
+      !this.state.emoticonPicker &&
+      this.state.chatInput.startsWith("/")
+    );
   }
 
   isConversationSwitcherActive(): boolean {
     return this.state.view === "chat" && this.state.conversationSwitcherActive;
+  }
+
+  isEmoticonPickerActive(): boolean {
+    return this.state.view === "chat" && !!this.state.emoticonPicker;
   }
 
   hasConversationSwitcherTargets(): boolean {
@@ -205,11 +216,15 @@ export class WechatApp implements Component {
   }
 
   isChatInputActive(): boolean {
-    return this.state.view === "chat" && !this.state.conversationSwitcherActive;
+    return this.state.view === "chat" && !this.state.conversationSwitcherActive && !this.state.emoticonPicker;
   }
 
   isChatInputEmpty(): boolean {
     return this.state.view === "chat" && this.state.chatInput.length === 0;
+  }
+
+  chatCursorIndex(): number {
+    return this.chatEditor.cursorIndex();
   }
 
   isCommandPanelVisible(): boolean {

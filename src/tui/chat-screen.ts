@@ -1,8 +1,9 @@
 import { theme, fit, fillLines } from "./theme.js";
 import { Header } from "./components/header.js";
-import { StatusBar, HINTS_CHAT, HINTS_CHAT_SWITCHER } from "./components/status-bar.js";
+import { StatusBar, HINTS_CHAT, HINTS_CHAT_SWITCHER, HINTS_EMOTICON_PICKER } from "./components/status-bar.js";
 import { MessageList } from "./components/message-list.js";
 import { ChatEditor } from "./components/chat-editor.js";
+import { EmoticonPicker } from "./components/emoticon-picker.js";
 import type { RenderState } from "../types.js";
 import type { FileRegistry } from "../util/file-hash.js";
 
@@ -10,6 +11,7 @@ export class ChatScreen {
   private readonly header = new Header();
   private readonly messages = new MessageList();
   private readonly statusBar = new StatusBar();
+  private readonly emoticonPicker = new EmoticonPicker();
 
   constructor(private readonly editor: ChatEditor) {}
 
@@ -29,25 +31,26 @@ export class ChatScreen {
 
     // Fixed bottom: status bar + editor
     const editorLines = this.editor.render(width);
-    const hints = state.conversationSwitcherActive ? HINTS_CHAT_SWITCHER : HINTS_CHAT;
+    const hints = state.emoticonPicker ? HINTS_EMOTICON_PICKER : state.conversationSwitcherActive ? HINTS_CHAT_SWITCHER : HINTS_CHAT;
     const unreadText = state.totalUnreadCount > 0 ? `${state.totalUnreadCount} unread` : "";
     const bottomLines: string[] = [];
     bottomLines.push(this.statusBar.render(state, hints, width, unreadText));
     bottomLines.push(...editorLines);
+    const emoticonLines = state.emoticonPicker ? this.emoticonPicker.render(state.emoticonPicker, width) : [];
 
     // Content: messages, sized to the remaining viewport above the fixed bottom.
     const messageRows = Math.max(
       1,
-      rows - headerLines.length - errorLines.length - switcherLines.length - bottomLines.length
+      rows - headerLines.length - errorLines.length - switcherLines.length - emoticonLines.length - bottomLines.length
     );
     const contentLines = this.messages.render(state, width, messageRows, fileRegistry);
 
-    // Layout: header → fill → error + content → bottom (bottom-aligned)
+    // Layout: header → fill → error + content → input → picker (bottom-aligned)
     const fixedCount =
-      headerLines.length + errorLines.length + contentLines.length + switcherLines.length + bottomLines.length;
+      headerLines.length + errorLines.length + contentLines.length + switcherLines.length + emoticonLines.length + bottomLines.length;
     const fill = fillLines(rows, fixedCount, 0, width);
 
-    return [...headerLines, ...fill, ...errorLines, ...contentLines, ...switcherLines, ...bottomLines];
+    return [...headerLines, ...fill, ...errorLines, ...contentLines, ...switcherLines, ...bottomLines, ...emoticonLines];
   }
 }
 

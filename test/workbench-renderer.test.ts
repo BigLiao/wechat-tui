@@ -6,6 +6,7 @@ import { WorkbenchTerminalRenderer, renderState } from "../src/ui/workbench-rend
 import { MessageList } from "../src/tui/components/message-list.js";
 import { CommandPanel } from "../src/tui/components/command-panel.js";
 import { ConfirmPanel } from "../src/tui/components/confirm-panel.js";
+import { EmoticonPicker } from "../src/tui/components/emoticon-picker.js";
 import { theme } from "../src/tui/theme.js";
 import { FileRegistry } from "../src/util/file-hash.js";
 import { createStartupRenderState } from "../src/startup-state.js";
@@ -305,6 +306,81 @@ describe("WorkbenchTerminalRenderer", () => {
       { type: "key", key: { sequence: "\x1b[C", name: "right" } },
       { type: "key", key: { sequence: "\r", name: "return" } }
     ]);
+  });
+
+  it("forwards emoticon picker input to runtime instead of the chat editor", () => {
+    const terminal = new InputTerminal();
+    const events: UiEvent[] = [];
+    const renderer = new WorkbenchTerminalRenderer(terminal);
+
+    renderer.start((event) => events.push(event), () => {});
+    renderer.render(
+      baseState({
+        view: "chat",
+        activeConversation: {
+          id: "conversation:boss",
+          protocolId: "@boss",
+          kind: "private",
+          title: "Boss",
+          unreadCount: 0,
+          updatedAt: 1_700_000_000_000
+        },
+        emoticonPicker: {
+          query: "",
+          selectedIndex: 0,
+          columns: 7,
+          total: 2,
+          sections: [
+            { title: "最近使用", items: [], emptyText: "暂无" },
+            { title: "所有", items: ["[微笑]", "[捂脸]"], emptyText: "无匹配" }
+          ]
+        }
+      })
+    );
+
+    terminal.send("w");
+    terminal.send("\x1b[C");
+    renderer.stop();
+
+    expect(events).toEqual([
+      { type: "key", key: { sequence: "w" }, chatCursorIndex: 0 },
+      { type: "key", key: { sequence: "\x1b[C", name: "right" }, chatCursorIndex: 0 }
+    ]);
+  });
+
+  it("forwards the chat cursor position when inserting an emoticon", () => {
+    const terminal = new InputTerminal();
+    const events: UiEvent[] = [];
+    const renderer = new WorkbenchTerminalRenderer(terminal);
+
+    renderer.start((event) => events.push(event), () => {});
+    renderer.render(
+      baseState({
+        view: "chat",
+        activeConversation: {
+          id: "conversation:boss",
+          protocolId: "@boss",
+          kind: "private",
+          title: "Boss",
+          unreadCount: 0,
+          updatedAt: 1_700_000_000_000
+        },
+        chatInput: "ab",
+        chatCursorIndex: 1,
+        emoticonPicker: {
+          query: "",
+          selectedIndex: 0,
+          columns: 7,
+          total: 1,
+          sections: [{ title: "所有", items: ["[微笑]"], emptyText: "无匹配" }]
+        }
+      })
+    );
+
+    terminal.send("\r");
+    renderer.stop();
+
+    expect(events).toEqual([{ type: "key", key: { sequence: "\r", name: "return" }, chatCursorIndex: 1 }]);
   });
 
   it("renders recent conversations with unread and group sender preview", () => {
@@ -621,6 +697,75 @@ describe("WorkbenchTerminalRenderer", () => {
     expect(plain).not.toContain("←→ switch");
     expect(plain).not.toContain("⏎ send");
     expect(plain).toContain("draft text");
+  });
+
+  it("renders the emoticon picker with recent and all sections", () => {
+    const output = renderState(
+      baseState({
+        view: "chat",
+        activeConversation: {
+          id: "conversation:boss",
+          protocolId: "@boss",
+          kind: "private",
+          title: "Boss",
+          unreadCount: 0,
+          updatedAt: 1_700_000_000_000
+        },
+        emoticonPicker: {
+          query: "wl",
+          selectedIndex: 1,
+          columns: 7,
+          total: 3,
+          sections: [
+            { title: "最近使用", items: ["[微笑]"], emptyText: "暂无" },
+            { title: "所有", items: ["[捂脸]", "[旺柴]"], emptyText: "无匹配" }
+          ]
+        }
+      }),
+      { width: 80, rows: 28 }
+    );
+
+    const plain = stripAnsi(output);
+    expect(plain).toContain("╭");
+    expect(plain).toContain("╰");
+    expect(plain).toContain("表情");
+    expect(plain).toContain("Esc 取消");
+    expect(plain).toContain("Enter 插入");
+    expect(plain).toContain("最近使用");
+    expect(plain).toContain("🔍 wl");
+    expect(plain).toContain("所有");
+    expect(plain).toContain("[微笑]");
+    expect(plain).toContain("[捂脸]");
+    expect(plain).toContain("🔍 输入搜索");
+    expect(plain).toContain("⏎ insert");
+    expect(plain).not.toContain("search");
+    expect(plain).not.toContain("↑↓ scroll");
+  });
+
+  it("keeps the emoticon picker short and scrolls around the selected row", () => {
+    const allItems = Array.from({ length: 42 }, (_, index) => `[表情${String(index + 1).padStart(2, "0")}]`);
+    const lines = new EmoticonPicker().render(
+      {
+        query: "",
+        selectedIndex: 35,
+        columns: 7,
+        total: allItems.length,
+        sections: [
+          { title: "最近使用", items: [], emptyText: "暂无" },
+          { title: "所有", items: allItems, emptyText: "无匹配" }
+        ]
+      },
+      100
+    );
+    const plain = stripAnsi(lines.join("\n"));
+
+    expect(lines).toHaveLength(7);
+    expect(plain).toContain("Esc 取消");
+    expect(plain).toContain("Enter 插入");
+    expect(plain).not.toContain("最近使用");
+    expect(plain).not.toContain("│  🔍");
+    expect(plain).toContain("[表情36]");
+    expect(plain).not.toContain("[表情01]");
   });
 
   it("renders remembered return targets before tab is pressed again", () => {
