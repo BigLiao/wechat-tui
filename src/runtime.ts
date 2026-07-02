@@ -30,6 +30,7 @@ import type {
   UiKey,
   UpdateInfo,
   UserProfile,
+  ViewFileSuggestion,
   WeChatProtocol,
   WorkbenchRenderer
 } from "./types.js";
@@ -60,6 +61,8 @@ export interface RuntimeOptions {
 const SEARCH_ENTER_SUPPRESSION_MS = 100;
 const STARTUP_FRAME_MS = 160;
 const RENDER_DEBOUNCE_MS = 8;
+const VIEW_FILE_SUGGESTION_LIMIT = 5;
+const VIEW_FILE_MESSAGE_SCAN_LIMIT = 200;
 
 export class WeChatRuntime extends EventEmitter {
   private view: AppView = "login";
@@ -1399,6 +1402,7 @@ export class WeChatRuntime extends EventEmitter {
     const messages = activeConversation
       ? await this.store.listMessages(activeConversation.id, this.activeMessageLimit())
       : [];
+    const viewFileSuggestions = await this.listViewFileSuggestions(activeConversation);
     const searchResults = this.view === "search" ? await this.store.searchContacts(this.searchKeyword, this.options.searchLimit ?? 20) : [];
     this.selectedSearchIndex = clampSelection(this.selectedSearchIndex, searchResults.length);
     const unreadConversations = await this.listUnreadConversations();
@@ -1459,6 +1463,7 @@ export class WeChatRuntime extends EventEmitter {
       selectedSearchIndex: this.selectedSearchIndex,
       chatInput: this.chatInput,
       chatCursorIndex: this.chatCursorIndex,
+      viewFileSuggestions,
       messageScrollOffset: this.messageScrollOffset,
       commandInput: this.conversationQuery.startsWith("/") ? this.conversationQuery : "",
       totalUnreadCount,
@@ -1484,6 +1489,44 @@ export class WeChatRuntime extends EventEmitter {
       total,
       sections
     };
+  }
+
+  private async listViewFileSuggestions(activeConversation: ConversationRecord | undefined): Promise<ViewFileSuggestion[]> {
+    if (!activeConversation) {
+      return [];
+    }
+    const messages = await this.store.listMessages(activeConversation.id, VIEW_FILE_MESSAGE_SCAN_LIMIT);
+    const suggestions: ViewFileSuggestion[] = [];
+    const seenHashes = new Set<string>();
+    const sortedMessages = [...messages].sort(
+      (left, right) => right.timestamp - left.timestamp || right.createdAt - left.createdAt
+    );
+
+    for (const message of sortedMessages) {
+      if (suggestions.length >= VIEW_FILE_SUGGESTION_LIMIT) {
+        break;
+      }
+      const localPath = stringField(asObject(message.raw), "localFilePath");
+      if (!localPath || !VIEWABLE_EXTENSIONS.has(extname(localPath).toLowerCase())) {
+        continue;
+      }
+      if (!(await fileExists(localPath))) {
+        continue;
+      }
+      const hash = this.fileRegistry.register(activeConversation.id, message.id, localPath);
+      if (seenHashes.has(hash)) {
+        continue;
+      }
+      seenHashes.add(hash);
+      suggestions.push({
+        hash,
+        filename: basename(localPath),
+        messageType: message.type,
+        timestamp: message.timestamp
+      });
+    }
+
+    return suggestions;
   }
 
   private async listUnreadConversations(): Promise<ConversationRecord[]> {

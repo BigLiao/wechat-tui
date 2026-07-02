@@ -3,16 +3,12 @@ import {
   CombinedAutocompleteProvider,
   Editor
 } from "@earendil-works/pi-tui";
-import type { Component, EditorTheme, SelectListTheme, TUI } from "@earendil-works/pi-tui";
+import type { AutocompleteItem, Component, EditorTheme, SelectListTheme, SlashCommand, TUI } from "@earendil-works/pi-tui";
 import { theme } from "../theme.js";
-import type { UiEvent } from "../../types.js";
+import type { UiEvent, ViewFileSuggestion } from "../../types.js";
 import { imageFilePathFromPastedText } from "../../util/path-input.js";
 
-const COMMANDS = [
-  { name: "emoticons", description: "Open WeChat emoticon picker" },
-  { name: "send", description: "Send a file (image, video, doc)" },
-  { name: "view", description: "Open a file by hash (e.g. /view a1c1)" }
-];
+const VIEW_FILE_COMPLETION_LIMIT = 5;
 
 const selectListTheme: SelectListTheme = {
   selectedPrefix: (text) => theme.accent(text),
@@ -40,11 +36,12 @@ export class ChatEditor implements Component {
   readonly focusTarget: Editor;
   private suppressChange = false;
   private imageCounter = 0;
+  private viewFileSuggestions: ViewFileSuggestion[] = [];
   private readonly imageAttachments = new Map<number, string>();
 
   constructor(private readonly tui: TUI, private readonly onEvent: (event: UiEvent) => void) {
     this.focusTarget = new Editor(tui, editorTheme, { paddingX: 1, autocompleteMaxVisible: 6 });
-    this.focusTarget.setAutocompleteProvider(new CombinedAutocompleteProvider(COMMANDS, process.cwd()));
+    this.focusTarget.setAutocompleteProvider(new CombinedAutocompleteProvider(this.commands(), process.cwd()));
     this.focusTarget.onChange = (text) => {
       if (!this.suppressChange) {
         this.onEvent({ type: "chat-change", text, cursorIndex: this.cursorIndex() });
@@ -53,6 +50,14 @@ export class ChatEditor implements Component {
     this.focusTarget.onSubmit = (text) => {
       this.handleSubmit(text);
     };
+  }
+
+  setViewFileSuggestions(suggestions: ViewFileSuggestion[]): void {
+    this.viewFileSuggestions = suggestions;
+  }
+
+  isAutocompleteOpen(): boolean {
+    return this.focusTarget.isShowingAutocomplete();
   }
 
   private handleSubmit(text: string): void {
@@ -66,6 +71,7 @@ export class ChatEditor implements Component {
     if (/^\/view\s*$/.test(text)) {
       this.syncText("/view ");
       this.onEvent({ type: "chat-change", text: "/view ", cursorIndex: this.cursorIndex() });
+      this.triggerAutocomplete();
       return;
     }
 
@@ -145,6 +151,13 @@ export class ChatEditor implements Component {
     editor.state.cursorCol = col;
   }
 
+  private triggerAutocomplete(): void {
+    const editor = this.focusTarget as unknown as {
+      requestAutocomplete?: (options: { force: boolean; explicitTab: boolean }) => void;
+    };
+    editor.requestAutocomplete?.({ force: false, explicitTab: true });
+  }
+
   invalidate(): void {
     this.focusTarget.invalidate();
   }
@@ -186,6 +199,40 @@ export class ChatEditor implements Component {
 
   handleInput(data: string): void {
     this.focusTarget.handleInput(data);
+  }
+
+  private commands(): SlashCommand[] {
+    return [
+      { name: "emoticons", description: "Open WeChat emoticon picker" },
+      { name: "send", description: "Send a file (image, video, doc)" },
+      {
+        name: "view",
+        description: "Open a file by hash",
+        argumentHint: "<hash>",
+        getArgumentCompletions: (argumentPrefix) => this.viewFileCompletions(argumentPrefix)
+      }
+    ];
+  }
+
+  private viewFileCompletions(argumentPrefix: string): AutocompleteItem[] {
+    const query = argumentPrefix.trim().replace(/^#/, "").toLocaleLowerCase();
+    return this.viewFileSuggestions
+      .filter((suggestion) => {
+        if (!query) {
+          return true;
+        }
+        return (
+          suggestion.hash.toLocaleLowerCase().includes(query) ||
+          suggestion.filename.toLocaleLowerCase().includes(query) ||
+          suggestion.messageType.toLocaleLowerCase().includes(query)
+        );
+      })
+      .slice(0, VIEW_FILE_COMPLETION_LIMIT)
+      .map((suggestion) => ({
+        value: suggestion.hash,
+        label: `#${suggestion.hash}`,
+        description: `[${suggestion.messageType}] ${suggestion.filename}`
+      }));
   }
 }
 

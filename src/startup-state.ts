@@ -23,6 +23,7 @@ export function createStartupRenderState(options: StartupStateOptions = {}): Ren
     searchResults: [],
     selectedSearchIndex: 0,
     chatInput: "",
+    viewFileSuggestions: [],
     messageScrollOffset: 0,
     commandInput: "",
     totalUnreadCount: 0,

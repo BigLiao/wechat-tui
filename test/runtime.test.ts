@@ -802,6 +802,45 @@ describe("WeChatRuntime", () => {
     await store.close();
   });
 
+  it("lists recent current-conversation viewable file hashes for /view completion", async () => {
+    const fileDir = mkdtempSync(join(tmpdir(), "wechat-tui-view-files-"));
+    tempDirs.push(fileDir);
+    const imagePaths = Array.from({ length: 6 }, (_, index) => join(fileDir, `image-${index + 1}.png`));
+    for (const imagePath of imagePaths) {
+      writeFileSync(imagePath, "fake png");
+    }
+    const documentPath = join(fileDir, "document.pdf");
+    writeFileSync(documentPath, "fake pdf");
+
+    const store = await SqliteStore.open(tempDb());
+    const protocol = new MockProtocol();
+    const renderer = new FakeRenderer();
+    const runtime = new WeChatRuntime(protocol, store, renderer, { initialHistoryLimit: 10 });
+
+    await runtime.start();
+    protocol.emitIncoming("Boss", "hello", 1_700_000_000_000);
+    await flushRender();
+    await runtime.handleKey(key.enter());
+
+    for (const imagePath of imagePaths) {
+      await runtime.handleUiEvent({ type: "chat-submit", text: `/send "${imagePath}"` });
+      await new Promise<void>((resolve) => setTimeout(resolve, 2));
+    }
+    await runtime.handleUiEvent({ type: "chat-submit", text: `/send "${documentPath}"` });
+
+    expect(renderer.latest.viewFileSuggestions).toHaveLength(5);
+    expect(renderer.latest.viewFileSuggestions.map((suggestion) => suggestion.filename)).toEqual([
+      "image-6.png",
+      "image-5.png",
+      "image-4.png",
+      "image-3.png",
+      "image-2.png"
+    ]);
+    expect(renderer.latest.viewFileSuggestions.every((suggestion) => /^[a-f0-9]{4}$/.test(suggestion.hash))).toBe(true);
+    expect(renderer.latest.viewFileSuggestions.map((suggestion) => suggestion.filename)).not.toContain("document.pdf");
+    await store.close();
+  });
+
   it("opens the WeChat emoticon picker, searches by pinyin, and inserts the selected text", async () => {
     const store = await SqliteStore.open(tempDb());
     const protocol = new MockProtocol();

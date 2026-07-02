@@ -229,11 +229,14 @@ function isGlobalChatKey(key: UiKey, app: WechatApp): boolean {
   if (app.isEmoticonPickerActive()) {
     return true;
   }
+  if (key.name === "escape" && app.isChatAutocompleteOpen()) {
+    return false;
+  }
   if (key.ctrl === true || key.name === "escape") {
     return true;
   }
-  // When autocomplete is active (typing a / command), let Editor handle completion and selection.
-  if ((key.name === "tab" || key.name === "up" || key.name === "down") && app.isChatAutocompleteActive()) {
+  // When typing a / command, let Editor handle completion and selection.
+  if ((key.name === "tab" || key.name === "up" || key.name === "down") && app.isChatAutocompleteContext()) {
     return false;
   }
   if (key.name === "tab" && app.isChatInputEmpty()) {

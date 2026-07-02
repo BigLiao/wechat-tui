@@ -43,6 +43,7 @@ function emptyState(): RenderState {
     selectedSearchIndex: 0,
     chatInput: "",
     chatCursorIndex: 0,
+    viewFileSuggestions: [],
     messageScrollOffset: 0,
     commandInput: "",
     totalUnreadCount: 0,
@@ -105,6 +106,7 @@ export class WechatApp implements Component {
     if (state.view === "chat") {
       this.commandPanelVisible = false;
       this.confirmPanelVisible = false;
+      this.chatEditor.setViewFileSuggestions(state.viewFileSuggestions);
       this.chatEditor.syncText(state.chatInput, state.chatCursorIndex);
       this.tui.setFocus(state.conversationSwitcherActive || state.emoticonPicker ? null : this.chatEditor.focusTarget);
     } else if (state.view === "chats") {
@@ -191,12 +193,21 @@ export class WechatApp implements Component {
     return this.state.view === "chat";
   }
 
-  isChatAutocompleteActive(): boolean {
+  isChatAutocompleteContext(): boolean {
     return (
       this.state.view === "chat" &&
       !this.state.conversationSwitcherActive &&
       !this.state.emoticonPicker &&
       this.state.chatInput.startsWith("/")
+    );
+  }
+
+  isChatAutocompleteOpen(): boolean {
+    return (
+      this.state.view === "chat" &&
+      !this.state.conversationSwitcherActive &&
+      !this.state.emoticonPicker &&
+      this.chatEditor.isAutocompleteOpen()
     );
   }
 

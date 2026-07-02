@@ -218,6 +218,13 @@ export interface EmoticonPickerRenderState {
   sections: EmoticonPickerSection[];
 }
 
+export interface ViewFileSuggestion {
+  hash: string;
+  filename: string;
+  messageType: MessageKind;
+  timestamp: number;
+}
+
 export interface RenderState {
   view: AppView;
   previousView?: AppView;
@@ -241,6 +248,7 @@ export interface RenderState {
   selectedSearchIndex: number;
   chatInput: string;
   chatCursorIndex?: number;
+  viewFileSuggestions: ViewFileSuggestion[];
   messageScrollOffset: number;
   commandInput: string;
   totalUnreadCount: number;

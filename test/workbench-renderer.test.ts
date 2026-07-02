@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import chalk from "chalk";
-import { CURSOR_MARKER } from "@earendil-works/pi-tui";
+import { CURSOR_MARKER, TUI } from "@earendil-works/pi-tui";
 import type { Terminal } from "@earendil-works/pi-tui";
 import { WorkbenchTerminalRenderer, renderState } from "../src/ui/workbench-renderer.js";
+import { ChatEditor } from "../src/tui/components/chat-editor.js";
 import { MessageList } from "../src/tui/components/message-list.js";
 import { CommandPanel } from "../src/tui/components/command-panel.js";
 import { ConfirmPanel } from "../src/tui/components/confirm-panel.js";
@@ -32,6 +33,7 @@ function baseState(overrides: Partial<RenderState>): RenderState {
     searchResults: [],
     selectedSearchIndex: 0,
     chatInput: "",
+    viewFileSuggestions: [],
     messageScrollOffset: 0,
     commandInput: "",
     totalUnreadCount: 0,
@@ -201,6 +203,55 @@ describe("WorkbenchTerminalRenderer", () => {
     renderer.stop();
 
     expect(events).not.toContainEqual({ type: "key", key: { sequence: "\t", name: "tab" } });
+  });
+
+  it("lets escape close chat autocomplete before leaving the chat", async () => {
+    const terminal = new InputTerminal();
+    const events: UiEvent[] = [];
+    const renderer = new WorkbenchTerminalRenderer(terminal);
+
+    renderer.start((event) => events.push(event), () => {});
+    renderer.render(
+      baseState({
+        view: "chat",
+        activeConversation: {
+          id: "conversation:boss",
+          protocolId: "@boss",
+          kind: "private",
+          title: "Boss",
+          unreadCount: 0,
+          updatedAt: 1_700_000_000_000
+        },
+        chatInput: "/"
+      })
+    );
+
+    terminal.send("\t");
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    terminal.send("\u001b");
+    renderer.stop();
+
+    expect(events).toEqual([]);
+  });
+
+  it("opens /view hash completions after selecting the slash command", () => {
+    const terminal = new InputTerminal();
+    const tui = new TUI(terminal);
+    const events: UiEvent[] = [];
+    const editor = new ChatEditor(tui, (event) => events.push(event));
+    const requestAutocomplete = vi.fn();
+
+    (
+      editor.focusTarget as unknown as {
+        requestAutocomplete: (options: { force: boolean; explicitTab: boolean }) => void;
+      }
+    ).requestAutocomplete = requestAutocomplete;
+
+    editor.focusTarget.onSubmit?.("/view");
+
+    expect(editor.focusTarget.getText()).toBe("/view ");
+    expect(events).toEqual([{ type: "chat-change", text: "/view ", cursorIndex: 6 }]);
+    expect(requestAutocomplete).toHaveBeenCalledWith({ force: false, explicitTab: true });
   });
 
   it("consumes tab before autocomplete when the chat input is empty and there are no unread conversations", () => {
