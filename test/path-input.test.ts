@@ -1,9 +1,9 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import { imageFilePathFromPastedText, normalizeUserFilePath } from "../src/util/path-input.js";
+import { existingUserFilePath, imageFilePathFromPastedText, normalizeUserFilePath } from "../src/util/path-input.js";
 
 const tempDirs: string[] = [];
 
@@ -41,6 +41,15 @@ describe("path input helpers", () => {
     const imagePath = tempImagePath();
 
     expect(imageFilePathFromPastedText(pathToFileURL(imagePath).href)).toBe(imagePath);
+  });
+
+  it("recognizes existing files but not directories or missing paths", async () => {
+    const imagePath = tempImagePath();
+
+    await expect(existingUserFilePath(`"${imagePath}"`)).resolves.toBe(imagePath);
+    await expect(existingUserFilePath(pathToFileURL(imagePath).href)).resolves.toBe(imagePath);
+    await expect(existingUserFilePath(dirname(imagePath))).resolves.toBeUndefined();
+    await expect(existingUserFilePath(`${imagePath}.missing`)).resolves.toBeUndefined();
   });
 
   it("does not touch the filesystem when parsing pasted image paths", () => {

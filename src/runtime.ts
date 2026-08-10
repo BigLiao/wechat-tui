@@ -39,7 +39,7 @@ import { conversationFromContact, groupMemberId, localMessageId } from "./util/i
 import { FileRegistry } from "./util/file-hash.js";
 import { MediaCache, extensionFromContentType } from "./util/media-cache.js";
 import { openWithSystem, revealInFileManager } from "./util/open.js";
-import { normalizeUserFilePath } from "./util/path-input.js";
+import { existingUserFilePath, normalizeUserFilePath } from "./util/path-input.js";
 import { createStartupRenderState } from "./startup-state.js";
 import {
   EMOTICON_GRID_COLUMNS,
@@ -787,6 +787,11 @@ export class WeChatRuntime extends EventEmitter {
     this.chatCursorIndex = 0;
     this.messageScrollOffset = 0;
     if (!text) {
+      return;
+    }
+    const filePath = await existingUserFilePath(text);
+    if (filePath) {
+      await this.sendFileToActiveConversation(filePath);
       return;
     }
     if (text.startsWith("/")) {
