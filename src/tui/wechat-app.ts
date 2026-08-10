@@ -234,6 +234,18 @@ export class WechatApp implements Component {
     return this.state.view === "chat" && this.state.chatInput.length === 0;
   }
 
+  canOpenInlineEmoticonCommand(): boolean {
+    return (
+      this.isChatInputActive() &&
+      this.chatEditor.canOpenInlineEmoticonCommand() &&
+      !this.chatEditor.isAutocompleteOpen()
+    );
+  }
+
+  openInlineEmoticonCommand(): void {
+    this.chatEditor.openInlineEmoticonCommand();
+  }
+
   chatCursorIndex(): number {
     return this.chatEditor.cursorIndex();
   }

@@ -802,6 +802,28 @@ describe("WeChatRuntime", () => {
     await store.close();
   });
 
+  it("sends an existing file path entered directly without /send", async () => {
+    const fileDir = mkdtempSync(join(tmpdir(), "wechat-tui-direct-file-"));
+    tempDirs.push(fileDir);
+    const filePath = join(fileDir, "quarterly report.pdf");
+    writeFileSync(filePath, "fake pdf");
+    const store = await SqliteStore.open(tempDb());
+    const protocol = new CapturingFileProtocol();
+    const renderer = new FakeRenderer();
+    const runtime = new WeChatRuntime(protocol, store, renderer, { initialHistoryLimit: 10 });
+
+    await runtime.start();
+    protocol.emitIncoming("Boss", "hello", 1_700_000_000_000);
+    await flushRender();
+    await runtime.handleKey(key.enter());
+    await runtime.handleUiEvent({ type: "chat-submit", text: `"${filePath}"` });
+
+    expect(protocol.sentFiles.at(-1)?.filePath).toBe(filePath);
+    expect(renderer.latest.errorMessage).toBeUndefined();
+    expect(renderer.latest.messages.at(-1)?.content).toBe("[file] quarterly report.pdf");
+    await store.close();
+  });
+
   it("lists recent current-conversation viewable file hashes for /view completion", async () => {
     const fileDir = mkdtempSync(join(tmpdir(), "wechat-tui-view-files-"));
     tempDirs.push(fileDir);
@@ -901,6 +923,28 @@ describe("WeChatRuntime", () => {
     expect(renderer.latest.chatInput).toBe("a[微笑]b");
     expect(renderer.latest.chatCursorIndex).toBe("a[微笑]".length);
     expect(renderer.latest.messages.map((message) => message.content)).not.toContain("a[微笑]b");
+    await store.close();
+  });
+
+  it("opens the emoticon picker without clearing an existing draft", async () => {
+    const store = await SqliteStore.open(tempDb());
+    const protocol = new MockProtocol();
+    const renderer = new FakeRenderer();
+    const runtime = new WeChatRuntime(protocol, store, renderer, { initialHistoryLimit: 10 });
+
+    await runtime.start();
+    protocol.emitIncoming("Boss", "hello", 1_700_000_000_000);
+    await flushRender();
+    await runtime.handleKey(key.enter());
+    await runtime.handleUiEvent({ type: "chat-change", text: "draft text", cursorIndex: 5 });
+    await runtime.handleUiEvent({ type: "emoticon-open" });
+
+    expect(renderer.latest.chatInput).toBe("draft text");
+    expect(renderer.latest.chatCursorIndex).toBe(5);
+    expect(renderer.latest.emoticonPicker).toBeDefined();
+
+    await runtime.handleUiEvent({ type: "key", key: key.enter(), chatCursorIndex: 5 });
+    expect(renderer.latest.chatInput).toBe("draft[微笑] text");
     await store.close();
   });
 

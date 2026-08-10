@@ -1,5 +1,6 @@
+import { stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { extname, resolve } from "node:path";
+import { extname, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const IMAGE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp"]);
@@ -13,11 +14,28 @@ export function normalizeUserFilePath(rawPath: string): string {
       // Fall through to ordinary path handling so the caller can show a useful not-found path.
     }
   }
-  value = unescapeShellPath(value);
-  if (value.startsWith("~")) {
-    return resolve(homedir(), value.slice(value.startsWith("~/") ? 2 : 1));
+  if (sep !== "\\" && !looksLikeWindowsAbsolutePath(value)) {
+    value = unescapeShellPath(value);
+  }
+  if (value === "~") {
+    return homedir();
+  }
+  if (/^~[\\/]/.test(value)) {
+    return resolve(homedir(), value.slice(2));
   }
   return resolve(value);
+}
+
+export async function existingUserFilePath(rawPath: string): Promise<string | undefined> {
+  if (!rawPath.trim()) {
+    return undefined;
+  }
+  const filePath = normalizeUserFilePath(rawPath);
+  try {
+    return (await stat(filePath)).isFile() ? filePath : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 export function imageFilePathFromPastedText(text: string): string | undefined {
@@ -44,4 +62,8 @@ function stripWrappingQuotes(value: string): string {
 
 function unescapeShellPath(value: string): string {
   return value.replace(/\\([\\ "'()&;<>|*?$[\]{}!#`])/g, "$1");
+}
+
+function looksLikeWindowsAbsolutePath(value: string): boolean {
+  return /^[A-Za-z]:[\\/]/.test(value) || /^\\\\/.test(value);
 }

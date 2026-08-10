@@ -202,6 +202,7 @@ export type UiEvent =
   | { type: "conversation-open"; conversationId?: string }
   | { type: "chat-change"; text: string; cursorIndex?: number }
   | { type: "chat-submit"; text: string; cursorIndex?: number }
+  | { type: "emoticon-open" }
   | { type: "file-submit"; filePath: string };
 
 export interface EmoticonPickerSection {
