@@ -193,6 +193,8 @@ export class WeChatRuntime extends EventEmitter {
       if (event.type === "chat-change") {
         this.chatInput = event.text;
         this.chatCursorIndex = clamp(event.cursorIndex ?? event.text.length, 0, event.text.length);
+      } else if (event.type === "emoticon-open") {
+        this.openEmoticonPicker("");
       } else if (event.type === "file-submit") {
         await this.sendFileToActiveConversation(event.filePath);
       } else {

@@ -926,6 +926,28 @@ describe("WeChatRuntime", () => {
     await store.close();
   });
 
+  it("opens the emoticon picker without clearing an existing draft", async () => {
+    const store = await SqliteStore.open(tempDb());
+    const protocol = new MockProtocol();
+    const renderer = new FakeRenderer();
+    const runtime = new WeChatRuntime(protocol, store, renderer, { initialHistoryLimit: 10 });
+
+    await runtime.start();
+    protocol.emitIncoming("Boss", "hello", 1_700_000_000_000);
+    await flushRender();
+    await runtime.handleKey(key.enter());
+    await runtime.handleUiEvent({ type: "chat-change", text: "draft text", cursorIndex: 5 });
+    await runtime.handleUiEvent({ type: "emoticon-open" });
+
+    expect(renderer.latest.chatInput).toBe("draft text");
+    expect(renderer.latest.chatCursorIndex).toBe(5);
+    expect(renderer.latest.emoticonPicker).toBeDefined();
+
+    await runtime.handleUiEvent({ type: "key", key: key.enter(), chatCursorIndex: 5 });
+    expect(renderer.latest.chatInput).toBe("draft[微笑] text");
+    await store.close();
+  });
+
   it("navigates to search via the search item in conversation list", async () => {
     const store = await SqliteStore.open(tempDb());
     const protocol = new MockProtocol();

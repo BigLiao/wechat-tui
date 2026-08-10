@@ -80,6 +80,11 @@ export class WorkbenchTerminalRenderer implements WorkbenchRenderer {
         return { consume: true };
       }
 
+      if (key.sequence === "/" && this.app?.canOpenInlineEmoticonCommand()) {
+        this.app.openInlineEmoticonCommand();
+        return { consume: true };
+      }
+
       if (
         this.app?.isChatView() &&
         key.name === "tab" &&
@@ -235,8 +240,11 @@ function isGlobalChatKey(key: UiKey, app: WechatApp): boolean {
   if (key.ctrl === true || key.name === "escape") {
     return true;
   }
-  // When typing a / command, let Editor handle completion and selection.
-  if ((key.name === "tab" || key.name === "up" || key.name === "down") && app.isChatAutocompleteContext()) {
+  // Let Editor handle completion and selection whenever its autocomplete is open.
+  if (
+    (key.name === "tab" || key.name === "up" || key.name === "down") &&
+    (app.isChatAutocompleteOpen() || app.isChatAutocompleteContext())
+  ) {
     return false;
   }
   if (key.name === "tab" && app.isChatInputEmpty()) {

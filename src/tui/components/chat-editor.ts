@@ -3,7 +3,16 @@ import {
   CombinedAutocompleteProvider,
   Editor
 } from "@earendil-works/pi-tui";
-import type { AutocompleteItem, Component, EditorTheme, SelectListTheme, SlashCommand, TUI } from "@earendil-works/pi-tui";
+import type {
+  AutocompleteItem,
+  AutocompleteProvider,
+  AutocompleteSuggestions,
+  Component,
+  EditorTheme,
+  SelectListTheme,
+  SlashCommand,
+  TUI
+} from "@earendil-works/pi-tui";
 import { theme } from "../theme.js";
 import type { UiEvent, ViewFileSuggestion } from "../../types.js";
 import { imageFilePathFromPastedText } from "../../util/path-input.js";
@@ -26,6 +35,12 @@ const editorTheme: EditorTheme = {
 const BRACKETED_PASTE_START = "\x1b[200~";
 const BRACKETED_PASTE_END = "\x1b[201~";
 const IMAGE_MARKER_REGEX = /\[Image #(\d+)\]/g;
+const INLINE_EMOTICON_COMPLETION_PREFIX = "inline-emoticon-command";
+const EMOTICON_COMMAND_ITEM: AutocompleteItem = {
+  value: "emoticons",
+  label: "/emoticons",
+  description: "Open WeChat emoticon picker"
+};
 
 /**
  * Chat editor — minimal input at the bottom.
@@ -35,16 +50,28 @@ const IMAGE_MARKER_REGEX = /\[Image #(\d+)\]/g;
 export class ChatEditor implements Component {
   readonly focusTarget: Editor;
   private suppressChange = false;
+  private pendingInlineEmoticonOpen = false;
   private imageCounter = 0;
   private viewFileSuggestions: ViewFileSuggestion[] = [];
   private readonly imageAttachments = new Map<number, string>();
+  private readonly autocompleteProvider: ChatAutocompleteProvider;
 
   constructor(private readonly tui: TUI, private readonly onEvent: (event: UiEvent) => void) {
     this.focusTarget = new Editor(tui, editorTheme, { paddingX: 1, autocompleteMaxVisible: 6 });
-    this.focusTarget.setAutocompleteProvider(new CombinedAutocompleteProvider(this.commands(), process.cwd()));
+    this.autocompleteProvider = new ChatAutocompleteProvider(
+      new CombinedAutocompleteProvider(this.commands(), process.cwd()),
+      () => {
+        this.pendingInlineEmoticonOpen = true;
+      }
+    );
+    this.focusTarget.setAutocompleteProvider(this.autocompleteProvider);
     this.focusTarget.onChange = (text) => {
       if (!this.suppressChange) {
         this.onEvent({ type: "chat-change", text, cursorIndex: this.cursorIndex() });
+        if (this.pendingInlineEmoticonOpen) {
+          this.pendingInlineEmoticonOpen = false;
+          this.onEvent({ type: "emoticon-open" });
+        }
       }
     };
     this.focusTarget.onSubmit = (text) => {
@@ -58,6 +85,15 @@ export class ChatEditor implements Component {
 
   isAutocompleteOpen(): boolean {
     return this.focusTarget.isShowingAutocomplete();
+  }
+
+  hasContent(): boolean {
+    return this.focusTarget.getText().length > 0;
+  }
+
+  openInlineEmoticonCommand(): void {
+    this.autocompleteProvider.requestInlineEmoticonCommand();
+    this.triggerAutocomplete();
   }
 
   private handleSubmit(text: string): void {
@@ -233,6 +269,51 @@ export class ChatEditor implements Component {
         label: `#${suggestion.hash}`,
         description: `[${suggestion.messageType}] ${suggestion.filename}`
       }));
+  }
+}
+
+class ChatAutocompleteProvider implements AutocompleteProvider {
+  private inlineEmoticonCommandRequested = false;
+
+  constructor(
+    private readonly delegate: CombinedAutocompleteProvider,
+    private readonly onInlineEmoticonCompletion: () => void
+  ) {}
+
+  requestInlineEmoticonCommand(): void {
+    this.inlineEmoticonCommandRequested = true;
+  }
+
+  async getSuggestions(
+    lines: string[],
+    cursorLine: number,
+    cursorCol: number,
+    options: { signal: AbortSignal; force?: boolean }
+  ): Promise<AutocompleteSuggestions | null> {
+    if (this.inlineEmoticonCommandRequested && !options.force) {
+      this.inlineEmoticonCommandRequested = false;
+      return { items: [EMOTICON_COMMAND_ITEM], prefix: INLINE_EMOTICON_COMPLETION_PREFIX };
+    }
+    this.inlineEmoticonCommandRequested = false;
+    return this.delegate.getSuggestions(lines, cursorLine, cursorCol, options);
+  }
+
+  applyCompletion(
+    lines: string[],
+    cursorLine: number,
+    cursorCol: number,
+    item: AutocompleteItem,
+    prefix: string
+  ): { lines: string[]; cursorLine: number; cursorCol: number } {
+    if (prefix === INLINE_EMOTICON_COMPLETION_PREFIX && item.value === EMOTICON_COMMAND_ITEM.value) {
+      this.onInlineEmoticonCompletion();
+      return { lines, cursorLine, cursorCol };
+    }
+    return this.delegate.applyCompletion(lines, cursorLine, cursorCol, item, prefix);
+  }
+
+  shouldTriggerFileCompletion(lines: string[], cursorLine: number, cursorCol: number): boolean {
+    return this.delegate.shouldTriggerFileCompletion(lines, cursorLine, cursorCol);
   }
 }
 
