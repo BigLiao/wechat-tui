@@ -87,8 +87,14 @@ export class ChatEditor implements Component {
     return this.focusTarget.isShowingAutocomplete();
   }
 
-  hasContent(): boolean {
-    return this.focusTarget.getText().length > 0;
+  canOpenInlineEmoticonCommand(): boolean {
+    if (!this.focusTarget.getText()) {
+      return false;
+    }
+    const cursor = this.focusTarget.getCursor();
+    const currentLine = this.focusTarget.getLines()[cursor.line] ?? "";
+    const textBeforeCursor = currentLine.slice(0, cursor.col);
+    return textBeforeCursor.length === 0 || /\s$/u.test(textBeforeCursor);
   }
 
   openInlineEmoticonCommand(): void {

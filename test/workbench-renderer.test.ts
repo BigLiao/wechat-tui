@@ -296,8 +296,8 @@ describe("WorkbenchTerminalRenderer", () => {
           unreadCount: 0,
           updatedAt: 1_700_000_000_000
         },
-        chatInput: "draft text",
-        chatCursorIndex: 5
+        chatInput: "draft ",
+        chatCursorIndex: 6
       })
     );
 
@@ -309,9 +309,48 @@ describe("WorkbenchTerminalRenderer", () => {
     renderer.stop();
 
     expect(events).toEqual([
-      { type: "chat-change", text: "draft text", cursorIndex: 5 },
+      { type: "chat-change", text: "draft ", cursorIndex: 6 },
       { type: "emoticon-open" }
     ]);
+  });
+
+  it.each([
+    { initialText: "A", typedText: "/B", expectedText: "A/B" },
+    { initialText: "https:", typedText: "//example.com", expectedText: "https://example.com" },
+    { initialText: ".", typedText: "/document.pdf", expectedText: "./document.pdf" }
+  ])("keeps slash literal while typing $expectedText", ({ initialText, typedText, expectedText }) => {
+    const terminal = new InputTerminal();
+    const events: UiEvent[] = [];
+    const renderer = new WorkbenchTerminalRenderer(terminal);
+
+    renderer.start((event) => events.push(event), () => {});
+    renderer.render(
+      baseState({
+        view: "chat",
+        activeConversation: {
+          id: "conversation:boss",
+          protocolId: "@boss",
+          kind: "private",
+          title: "Boss",
+          unreadCount: 0,
+          updatedAt: 1_700_000_000_000
+        },
+        chatInput: initialText,
+        chatCursorIndex: initialText.length
+      })
+    );
+
+    for (const char of typedText) {
+      terminal.send(char);
+    }
+    renderer.stop();
+
+    expect(events.at(-1)).toEqual({
+      type: "chat-change",
+      text: expectedText,
+      cursorIndex: expectedText.length
+    });
+    expect(events).not.toContainEqual({ type: "emoticon-open" });
   });
 
   it("consumes tab before autocomplete when the chat input is empty and there are no unread conversations", () => {

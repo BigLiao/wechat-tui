@@ -235,7 +235,11 @@ export class WechatApp implements Component {
   }
 
   canOpenInlineEmoticonCommand(): boolean {
-    return this.isChatInputActive() && this.chatEditor.hasContent() && !this.chatEditor.isAutocompleteOpen();
+    return (
+      this.isChatInputActive() &&
+      this.chatEditor.canOpenInlineEmoticonCommand() &&
+      !this.chatEditor.isAutocompleteOpen()
+    );
   }
 
   openInlineEmoticonCommand(): void {
