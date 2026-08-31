@@ -167,6 +167,42 @@ describe("WorkbenchTerminalRenderer", () => {
     expect(events).toEqual([{ type: "key", key: { sequence: "\t", name: "tab" } }]);
   });
 
+  it("reassembles split surrogate pairs before composite emoji reach the chat editor", () => {
+    const terminal = new InputTerminal();
+    const events: UiEvent[] = [];
+    const renderer = new WorkbenchTerminalRenderer(terminal);
+
+    renderer.start((event) => events.push(event), () => {});
+    renderer.render(
+      baseState({
+        view: "chat",
+        activeConversation: {
+          id: "conversation:boss",
+          protocolId: "@boss",
+          kind: "private",
+          title: "Boss",
+          unreadCount: 0,
+          updatedAt: 1_700_000_000_000
+        }
+      })
+    );
+
+    for (const codeUnit of "😮‍💨") {
+      for (let index = 0; index < codeUnit.length; index += 1) {
+        terminal.send(codeUnit[index] ?? "");
+      }
+    }
+    terminal.send("!");
+    renderer.stop();
+
+    expect(events).toEqual([
+      { type: "chat-change", text: "😮", cursorIndex: 2 },
+      { type: "chat-change", text: "😮‍", cursorIndex: 3 },
+      { type: "chat-change", text: "😮‍💨", cursorIndex: 5 },
+      { type: "chat-change", text: "😮‍💨!", cursorIndex: 6 }
+    ]);
+  });
+
   it("lets slash command autocomplete handle tab before conversation switching", () => {
     const terminal = new InputTerminal();
     const events: UiEvent[] = [];
