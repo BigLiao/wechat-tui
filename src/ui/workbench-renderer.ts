@@ -32,6 +32,7 @@ export class WorkbenchTerminalRenderer implements WorkbenchRenderer {
   private fileRegistry?: FileRegistry;
   private lastKeyInput?: LastKeyInput;
   private terminalTitle?: string;
+  private pendingHighSurrogate?: string;
 
   constructor(private readonly terminal: Terminal = new ProcessTerminal()) {}
 
@@ -41,6 +42,7 @@ export class WorkbenchTerminalRenderer implements WorkbenchRenderer {
   }
 
   start(onEvent: (event: UiEvent) => void, onClose: () => void): void {
+    this.pendingHighSurrogate = undefined;
     this.tui = new TUI(this.terminal);
     this.app = new WechatApp(this.tui, onEvent);
     if (this.fileRegistry) {
@@ -48,6 +50,15 @@ export class WorkbenchTerminalRenderer implements WorkbenchRenderer {
     }
     this.tui.addChild(this.app);
     this.removeInputListener = this.tui.addInputListener((data) => {
+      const originalData = data;
+      const assembledData = this.assembleUnicodeInput(data);
+      if (assembledData === undefined) {
+        return { consume: true };
+      }
+      data = assembledData;
+      const forwardInput = (): { data: string } | undefined =>
+        data === originalData ? undefined : { data };
+
       // Intercept bracketed paste containing image file paths in chat view
       if (this.app?.isChatInputActive() && data.includes(BRACKETED_PASTE_START)) {
         const transformed = this.app.transformPasteInput(data);
@@ -58,7 +69,7 @@ export class WorkbenchTerminalRenderer implements WorkbenchRenderer {
 
       const key = rawInputToKey(data);
       if (!key) {
-        return undefined;
+        return forwardInput();
       }
       if (this.shouldSuppressDuplicateKey(key)) {
         return { consume: true };
@@ -72,7 +83,7 @@ export class WorkbenchTerminalRenderer implements WorkbenchRenderer {
 
       // When command panel is visible, let SelectList handle all input
       if (this.app?.isChatsView() && this.app.isCommandPanelVisible()) {
-        return undefined;
+        return forwardInput();
       }
 
       if (this.app?.isChatView() && this.app.isEmoticonPickerActive()) {
@@ -97,10 +108,10 @@ export class WorkbenchTerminalRenderer implements WorkbenchRenderer {
 
       // Let focused components (Editor, SelectList) handle input directly
       if (this.app?.isChatView() && !isGlobalChatKey(key, this.app)) {
-        return undefined;
+        return forwardInput();
       }
       if (this.app?.isChatsView() && !isGlobalChatsKey(key)) {
-        return undefined;
+        return forwardInput();
       }
       onEvent({ type: "key", key });
       return { consume: true };
@@ -124,6 +135,7 @@ export class WorkbenchTerminalRenderer implements WorkbenchRenderer {
     this.tui = undefined;
     this.app = undefined;
     this.lastKeyInput = undefined;
+    this.pendingHighSurrogate = undefined;
     this.updateTerminalTitle(DEFAULT_TERMINAL_TITLE);
   }
 
@@ -157,6 +169,33 @@ export class WorkbenchTerminalRenderer implements WorkbenchRenderer {
     this.lastKeyInput = { name, at: now };
     return shouldSuppress;
   }
+
+  private assembleUnicodeInput(data: string): string | undefined {
+    if (this.pendingHighSurrogate !== undefined) {
+      const highSurrogate = this.pendingHighSurrogate;
+      this.pendingHighSurrogate = undefined;
+      if (isLowSurrogate(data)) {
+        return highSurrogate + data;
+      }
+    }
+
+    if (isHighSurrogate(data)) {
+      this.pendingHighSurrogate = data;
+      return undefined;
+    }
+    if (isLowSurrogate(data)) {
+      return undefined;
+    }
+    return data;
+  }
+}
+
+function isHighSurrogate(data: string): boolean {
+  return data.length === 1 && data.charCodeAt(0) >= 0xd800 && data.charCodeAt(0) <= 0xdbff;
+}
+
+function isLowSurrogate(data: string): boolean {
+  return data.length === 1 && data.charCodeAt(0) >= 0xdc00 && data.charCodeAt(0) <= 0xdfff;
 }
 
 function terminalTitleForState(state: RenderState): string {
